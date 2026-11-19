@@ -649,6 +649,9 @@ impl Broker {
         let mut anchor_results = Vec::new();
         let mut tier1_passed = 0usize;
         let mut tier1_total = 0usize;
+        let mut tier2_passed = 0usize;
+        let mut tier2_total = 0usize;
+        let mut any_anchor_failed = false;
 
         for anchor in selected {
             if anchor.zone == "B" && anchor.cassette_sha256.is_none() {
@@ -664,10 +667,18 @@ impl Broker {
             trace_bytes.extend_from_slice(&stdout);
             trace_bytes.extend_from_slice(&stderr);
             let passed = exit_code == 0;
+            if !passed {
+                any_anchor_failed = true;
+            }
             if anchor.tier == 1 {
                 tier1_total += 1;
                 if passed {
                     tier1_passed += 1;
+                }
+            } else {
+                tier2_total += 1;
+                if passed {
+                    tier2_passed += 1;
                 }
             }
             anchor_results.push(AnchorResult {
@@ -704,15 +715,16 @@ impl Broker {
 
         let lexicase_grade = if !tier0.passed || !tamper_free {
             "rejected".to_string()
-        } else if tier1_total == 0 || tier1_passed == tier1_total {
+        } else if !any_anchor_failed && tier1_passed == tier1_total && tier2_passed == tier2_total {
             "canonical".to_string()
-        } else if tier1_total >= 4 && tier1_passed + 1 >= tier1_total {
+        } else if tier2_passed == tier2_total && tier1_total >= 4 && tier1_passed + 1 >= tier1_total
+        {
             "stepping_stone".to_string()
         } else {
             "rejected".to_string()
         };
 
-        let result_tree = workspace_tree_digest(&self.repo_root, &patched_map);
+        let result_tree = workspace_tree_digest(work_dir, &BTreeMap::new());
         let requires_approval = packet.risk_class == RiskClass::HighRisk;
 
         let mut bundle = EvidenceBundle {
@@ -737,6 +749,8 @@ impl Broker {
                 tier0_pass: true, // overwritten below
                 tier1_passed,
                 tier1_total,
+                tier2_passed,
+                tier2_total,
                 lexicase_grade,
                 widened_for_unresolved_sites: widened_reasons,
             },
@@ -759,12 +773,32 @@ impl Broker {
         let touched_paths: Vec<String> = packet.edits.iter().map(|e| e.path.clone()).collect();
         validate_call_policy("splice_project", &touched_paths, 1, false, &policy)?;
 
-        if bundle.packet_id != packet.packet_id {
+        if bundle.packet_id != packet.packet_id || bundle.base_tree != packet.base_tree {
             return Err(MdeError::new(
                 "ERR_BUNDLE_MISMATCH",
-                "evidence bundle packet_id does not match splice packet",
+                "evidence bundle packet_id or base_tree does not match splice packet",
             ));
         }
+
+        // Enforce live tree and commit freshness before projecting.
+        let current_head = git_rev_parse(&self.repo_root, "HEAD").unwrap_or_default();
+        let current_base_tree = git_rev_parse(&self.repo_root, "HEAD^{tree}")
+            .unwrap_or_else(|| workspace_tree_digest(&self.repo_root, &BTreeMap::new()));
+        if (!packet.base_commit.is_empty() && current_head != packet.base_commit)
+            || current_base_tree != packet.base_tree
+        {
+            return Err(MdeError::with_detail(
+                "ERR_STALE_BASE_TREE",
+                "repository HEAD or base tree changed since packet was created",
+                json!({
+                    "expected_base_commit": packet.base_commit,
+                    "actual_head": current_head,
+                    "expected_base_tree": packet.base_tree,
+                    "actual_base_tree": current_base_tree
+                }),
+            ));
+        }
+
         if !bundle.summary.tier0_pass
             || !bundle.oracle_integrity.tamper_free
             || !bundle.secret_scan.passed
@@ -797,6 +831,22 @@ impl Broker {
             let updated = apply_byte_span_edits(rel_path, &orig, edits)?;
             originals.insert(rel_path.clone(), orig);
             patched_files.insert(rel_path.clone(), updated);
+        }
+
+        // Verify live patched workspace tree matches both bundle.result_tree and expected_result_tree.
+        let actual_result_tree = workspace_tree_digest(&self.repo_root, &patched_files);
+        if actual_result_tree != bundle.result_tree
+            || actual_result_tree != packet.git_projection.expected_result_tree
+        {
+            return Err(MdeError::with_detail(
+                "ERR_RESULT_TREE_MISMATCH",
+                "patched workspace tree does not match verified bundle result_tree",
+                json!({
+                    "actual_result_tree": actual_result_tree,
+                    "bundle_result_tree": bundle.result_tree,
+                    "expected_result_tree": packet.git_projection.expected_result_tree
+                }),
+            ));
         }
 
         // Compute exact unified diff digest by staging in a scratch worktree or computing diff.
@@ -912,13 +962,23 @@ impl Broker {
     }
 
     pub fn load_packet(&self, packet_id: &str) -> MdeResult<SplicePacket> {
+        validate_digest_id(packet_id, "packet_id")?;
         let fname = format!("{}.json", packet_id.replace(':', "_"));
         let path = self.repo_root.join(".mde/packets").join(fname);
         let raw = fs::read_to_string(&path).map_err(|e| {
             MdeError::new("ERR_PACKET_NOT_FOUND", format!("packet {packet_id}: {e}"))
         })?;
-        serde_json::from_str(&raw)
-            .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("corrupt packet: {e}")))
+        let packet: SplicePacket = serde_json::from_str(&raw)
+            .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("corrupt packet: {e}")))?;
+        let computed = canonical_json_sha256(&packet, Some("packet_id"))?;
+        if computed != packet_id || packet.packet_id != packet_id {
+            return Err(MdeError::with_detail(
+                "ERR_TAMPERED_PACKET",
+                "packet JSON digest does not match packet_id",
+                json!({"expected": packet_id, "computed": computed}),
+            ));
+        }
+        Ok(packet)
     }
 
     fn persist_bundle(&self, bundle: &EvidenceBundle) -> MdeResult<()> {
@@ -933,14 +993,44 @@ impl Broker {
     }
 
     pub fn load_bundle(&self, bundle_id: &str) -> MdeResult<EvidenceBundle> {
+        validate_digest_id(bundle_id, "bundle_id")?;
         let fname = format!("{}.json", bundle_id.replace(':', "_"));
         let path = self.repo_root.join(".mde/bundles").join(fname);
         let raw = fs::read_to_string(&path).map_err(|e| {
             MdeError::new("ERR_BUNDLE_NOT_FOUND", format!("bundle {bundle_id}: {e}"))
         })?;
-        serde_json::from_str(&raw)
-            .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("corrupt bundle: {e}")))
+        let bundle: EvidenceBundle = serde_json::from_str(&raw)
+            .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("corrupt bundle: {e}")))?;
+        let computed = canonical_json_sha256(&bundle, Some("bundle_id"))?;
+        if computed != bundle_id || bundle.bundle_id != bundle_id {
+            return Err(MdeError::with_detail(
+                "ERR_TAMPERED_BUNDLE",
+                "bundle JSON digest does not match bundle_id",
+                json!({"expected": bundle_id, "computed": computed}),
+            ));
+        }
+        Ok(bundle)
     }
+}
+
+fn validate_digest_id(id: &str, field: &str) -> MdeResult<()> {
+    let Some(hex_part) = id.strip_prefix("sha256:") else {
+        return Err(MdeError::new(
+            "ERR_INVALID_DIGEST_ID",
+            format!("{field} must have format sha256:<64 lowercase hex chars>"),
+        ));
+    };
+    if hex_part.len() != 64
+        || !hex_part
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(MdeError::new(
+            "ERR_INVALID_DIGEST_ID",
+            format!("{field} contains invalid digest characters or length"),
+        ));
+    }
+    Ok(())
 }
 
 fn new_token_store() -> TokenStore {
@@ -1045,17 +1135,59 @@ fn workspace_tree_digest(root: &Path, overrides: &BTreeMap<String, Vec<u8>>) -> 
 }
 
 fn hash_protected_oracles(work_dir: &Path, policy: &PolicyConfig) -> MdeResult<String> {
-    let files = collect_workspace_files(work_dir)?;
+    let mut targets: Vec<String> = collect_workspace_files(work_dir)?
+        .into_iter()
+        .filter(|f| is_protected_oracle_path(f, policy))
+        .collect();
+
+    // Explicitly include configured protected paths even under `.mde/` (which walk_dir_rel skips).
+    for spec in &policy.protected_oracle_paths {
+        if spec.ends_with('/') {
+            let dir = work_dir.join(spec.trim_end_matches('/'));
+            if dir.is_dir() {
+                let mut nested = Vec::new();
+                collect_all_files_in_dir(work_dir, &dir, &mut nested)?;
+                for f in nested {
+                    if !targets.contains(&f) {
+                        targets.push(f);
+                    }
+                }
+            }
+        } else if !targets.contains(spec) {
+            targets.push(spec.clone());
+        }
+    }
+    targets.sort();
+
     let mut manifest = Vec::new();
-    for f in files {
-        if is_protected_oracle_path(&f, policy) {
-            let bytes = fs::read(work_dir.join(&f)).map_err(|e| {
+    for f in targets {
+        let abs = work_dir.join(&f);
+        if abs.is_file() {
+            let bytes = fs::read(&abs).map_err(|e| {
                 MdeError::new("ERR_IO", format!("oracle read failed for {f}: {e}"))
             })?;
             manifest.extend_from_slice(format!("{f}\t{}\n", sha256_prefixed(&bytes)).as_bytes());
+        } else {
+            manifest.extend_from_slice(format!("{f}\tABSENT\n").as_bytes());
         }
     }
     Ok(sha256_prefixed(&manifest))
+}
+
+fn collect_all_files_in_dir(root: &Path, dir: &Path, out: &mut Vec<String>) -> MdeResult<()> {
+    let entries = fs::read_dir(dir)
+        .map_err(|e| MdeError::new("ERR_IO", format!("read_dir failed: {e}")))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_all_files_in_dir(root, &path, out)?;
+        } else if path.is_file() {
+            if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    Ok(())
 }
 
 struct IsolatedWorkspace {

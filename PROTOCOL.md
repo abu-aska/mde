@@ -167,6 +167,8 @@ All packets and bundles serialize as canonical UTF-8 JSON with sorted keys and c
     "tier0_pass": true,
     "tier1_passed": 1,
     "tier1_total": 1,
+    "tier2_passed": 1,
+    "tier2_total": 1,
     "lexicase_grade": "canonical",
     "widened_for_unresolved_sites": []
   },

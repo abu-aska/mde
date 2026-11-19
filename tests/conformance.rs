@@ -1059,7 +1059,8 @@ fn cli_process_roundtrip_and_policy_guards() {
             "replacement_utf8": "int inc(int x) {\n    return x + 2;\n}"
         }]
     });
-    let spec_file = tmp.path().join("patch_spec.json");
+    let spec_dir = TempDir::new().unwrap();
+    let spec_file = spec_dir.path().join("patch_spec.json");
     fs::write(&spec_file, serde_json::to_vec(&patch_spec).unwrap()).unwrap();
     let patch_out = Command::new(bin)
         .args([
@@ -1182,4 +1183,287 @@ fn inline_prose_and_formal_proof_zone_tags_in_code_files() {
         loc.symbols.iter().any(|s| s.symbol == "compute" && s.zone == Zone::Code),
         "expected standard function tagged as Zone::Code"
     );
+}
+
+#[test]
+fn tier2_holdout_failure_blocks_canonical_grade_and_projection() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    fs::create_dir_all(tmp.path().join("src")).unwrap();
+    fs::create_dir_all(tmp.path().join(".mde")).unwrap();
+    fs::write(tmp.path().join("src/mod.py"), "def f():\n    return 1\n").unwrap();
+
+    let mut policy = PolicyConfig::default();
+    policy.anchors.push(AnchorSpec {
+        anchor_id: "tier1_visible_pass".into(),
+        tier: 1,
+        visibility: "visible".into(),
+        zone: "A".into(),
+        cmd: vec!["true".into()],
+        path_prefixes: vec!["src/".into()],
+        cassette_sha256: None,
+    });
+    policy.anchors.push(AnchorSpec {
+        anchor_id: "tier2_holdout_fail".into(),
+        tier: 2,
+        visibility: "holdout".into(),
+        zone: "A".into(),
+        cmd: vec!["false".into()],
+        path_prefixes: vec!["src/".into()],
+        cassette_sha256: None,
+    });
+    fs::write(
+        tmp.path().join(".mde/policy.json"),
+        serde_json::to_vec_pretty(&policy).unwrap(),
+    )
+    .unwrap();
+    commit_all(tmp.path(), "init tier2 test");
+
+    let mut broker = Broker::open(tmp.path(), false).unwrap();
+    let loc = broker
+        .splice_locate(LocateRequest {
+            path: "src/mod.py".into(),
+            capability_id: None,
+        })
+        .unwrap();
+    let sym = &loc.symbols[0];
+    let pkt = broker
+        .splice_patch(PatchRequest {
+            capability_id: "cap.mod".into(),
+            read_tokens: vec![sym.read_token.clone()],
+            edits: vec![PatchEditInput {
+                path: "src/mod.py".into(),
+                start_byte: sym.start_byte,
+                end_byte: sym.end_byte,
+                expected_old_sha256: sym.span_sha256.clone(),
+                replacement_utf8: "def f():\n    return 2".into(),
+                anchor_symbol: Some("f".into()),
+                anchor_node_kind: None,
+            }],
+            lane: None,
+            seam_contract: None,
+            commit_subject: Some("mod: return 2".into()),
+            summary_lines: vec![],
+            allow_oracle_write: false,
+            actor: None,
+            mode: None,
+            model_id: None,
+        })
+        .unwrap();
+
+    let bundle = broker
+        .splice_verify(VerifyRequest {
+            packet_id: pkt.packet_id.clone(),
+            eval_count: None,
+        })
+        .unwrap();
+    assert_eq!(bundle.summary.tier1_passed, 1);
+    assert_eq!(bundle.summary.tier1_total, 1);
+    assert_eq!(bundle.summary.tier2_passed, 0);
+    assert_eq!(bundle.summary.tier2_total, 1);
+    assert_eq!(bundle.summary.lexicase_grade, "rejected");
+
+    let err = broker
+        .splice_project(ProjectRequest {
+            packet_id: pkt.packet_id,
+            bundle_id: bundle.bundle_id,
+            approve_diff_sha256: None,
+        })
+        .unwrap_err();
+    assert_eq!(err.code, "ERR_VERIFY_FAILED");
+}
+
+#[test]
+fn digest_traversal_tamper_and_stale_tree_checks_in_project() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    fs::create_dir_all(tmp.path().join("src")).unwrap();
+    fs::write(tmp.path().join("src/a.rs"), "pub fn a() -> i32 { 1 }\n").unwrap();
+    fs::write(tmp.path().join("src/b.rs"), "pub fn b() -> i32 { 2 }\n").unwrap();
+    commit_all(tmp.path(), "init");
+
+    let mut broker = Broker::open(tmp.path(), false).unwrap();
+
+    // 1. Path traversal in packet_id / bundle_id must fail with ERR_INVALID_DIGEST_ID.
+    assert_eq!(
+        broker.load_packet("../../etc/passwd").unwrap_err().code,
+        "ERR_INVALID_DIGEST_ID"
+    );
+    assert_eq!(
+        broker
+            .load_bundle("sha256:../../../escape")
+            .unwrap_err()
+            .code,
+        "ERR_INVALID_DIGEST_ID"
+    );
+
+    let loc = broker
+        .splice_locate(LocateRequest {
+            path: "src/a.rs".into(),
+            capability_id: None,
+        })
+        .unwrap();
+    let sym = &loc.symbols[0];
+    let pkt = broker
+        .splice_patch(PatchRequest {
+            capability_id: "cap.a".into(),
+            read_tokens: vec![sym.read_token.clone()],
+            edits: vec![PatchEditInput {
+                path: "src/a.rs".into(),
+                start_byte: sym.start_byte,
+                end_byte: sym.end_byte,
+                expected_old_sha256: sym.span_sha256.clone(),
+                replacement_utf8: "pub fn a() -> i32 { 10 }".into(),
+                anchor_symbol: Some("a".into()),
+                anchor_node_kind: None,
+            }],
+            lane: None,
+            seam_contract: None,
+            commit_subject: Some("a: return 10".into()),
+            summary_lines: vec![],
+            allow_oracle_write: false,
+            actor: None,
+            mode: None,
+            model_id: None,
+        })
+        .unwrap();
+    let bundle = broker
+        .splice_verify(VerifyRequest {
+            packet_id: pkt.packet_id.clone(),
+            eval_count: None,
+        })
+        .unwrap();
+
+    // 2. Dirtying an unrelated file without committing causes result_tree mismatch.
+    fs::write(tmp.path().join("src/b.rs"), "pub fn b() -> i32 { 99 }\n").unwrap();
+    let dirty_err = broker
+        .splice_project(ProjectRequest {
+            packet_id: pkt.packet_id.clone(),
+            bundle_id: bundle.bundle_id.clone(),
+            approve_diff_sha256: None,
+        })
+        .unwrap_err();
+    assert_eq!(dirty_err.code, "ERR_RESULT_TREE_MISMATCH");
+
+    // 3. Committing that unrelated file change advances HEAD and triggers ERR_STALE_BASE_TREE.
+    commit_all(tmp.path(), "advance base tree on unrelated file");
+    let stale_err = broker
+        .splice_project(ProjectRequest {
+            packet_id: pkt.packet_id.clone(),
+            bundle_id: bundle.bundle_id.clone(),
+            approve_diff_sha256: None,
+        })
+        .unwrap_err();
+    assert_eq!(stale_err.code, "ERR_STALE_BASE_TREE");
+
+    // 4. Tampering with packet JSON on disk triggers ERR_TAMPERED_PACKET.
+    let pkt_file = tmp
+        .path()
+        .join(".mde/packets")
+        .join(format!("{}.json", pkt.packet_id.replace(':', "_")));
+    let tampered_pkt = fs::read_to_string(&pkt_file)
+        .unwrap()
+        .replace("cap.a", "cap.tampered");
+    fs::write(&pkt_file, tampered_pkt).unwrap();
+    assert_eq!(
+        broker.load_packet(&pkt.packet_id).unwrap_err().code,
+        "ERR_TAMPERED_PACKET"
+    );
+
+    // 5. Tampering with bundle JSON on disk triggers ERR_TAMPERED_BUNDLE.
+    let bundle_file = tmp
+        .path()
+        .join(".mde/bundles")
+        .join(format!("{}.json", bundle.bundle_id.replace(':', "_")));
+    let tampered_bundle = fs::read_to_string(&bundle_file)
+        .unwrap()
+        .replace("\"canonical\"", "\"tampered\"");
+    fs::write(&bundle_file, tampered_bundle).unwrap();
+    assert_eq!(
+        broker.load_bundle(&bundle.bundle_id).unwrap_err().code,
+        "ERR_TAMPERED_BUNDLE"
+    );
+}
+
+#[test]
+fn dot_mde_policy_oracle_tampering_is_detected() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    fs::create_dir_all(tmp.path().join("src")).unwrap();
+    fs::create_dir_all(tmp.path().join(".mde")).unwrap();
+    fs::write(tmp.path().join("src/item.py"), "def x():\n    return 1\n").unwrap();
+
+    let mut policy = PolicyConfig::default();
+    policy.anchors.push(AnchorSpec {
+        anchor_id: "mutates_dot_mde_policy".into(),
+        tier: 1,
+        visibility: "visible".into(),
+        zone: "A".into(),
+        cmd: vec![
+            "sh".into(),
+            "-c".into(),
+            "echo ' ' >> .mde/policy.json".into(),
+        ],
+        path_prefixes: vec!["src/".into()],
+        cassette_sha256: None,
+    });
+    fs::write(
+        tmp.path().join(".mde/policy.json"),
+        serde_json::to_vec_pretty(&policy).unwrap(),
+    )
+    .unwrap();
+    commit_all(tmp.path(), "init with committed .mde/policy.json");
+
+    let mut broker = Broker::open(tmp.path(), false).unwrap();
+    let loc = broker
+        .splice_locate(LocateRequest {
+            path: "src/item.py".into(),
+            capability_id: None,
+        })
+        .unwrap();
+    let sym = &loc.symbols[0];
+    let pkt = broker
+        .splice_patch(PatchRequest {
+            capability_id: "cap.item".into(),
+            read_tokens: vec![sym.read_token.clone()],
+            edits: vec![PatchEditInput {
+                path: "src/item.py".into(),
+                start_byte: sym.start_byte,
+                end_byte: sym.end_byte,
+                expected_old_sha256: sym.span_sha256.clone(),
+                replacement_utf8: "def x():\n    return 2".into(),
+                anchor_symbol: Some("x".into()),
+                anchor_node_kind: None,
+            }],
+            lane: None,
+            seam_contract: None,
+            commit_subject: Some("item: return 2".into()),
+            summary_lines: vec![],
+            allow_oracle_write: false,
+            actor: None,
+            mode: None,
+            model_id: None,
+        })
+        .unwrap();
+
+    let bundle = broker
+        .splice_verify(VerifyRequest {
+            packet_id: pkt.packet_id.clone(),
+            eval_count: None,
+        })
+        .unwrap();
+    assert!(
+        !bundle.oracle_integrity.tamper_free,
+        "mutation of .mde/policy.json must trip oracle tamper check"
+    );
+    assert_eq!(bundle.summary.lexicase_grade, "rejected");
+
+    let err = broker
+        .splice_project(ProjectRequest {
+            packet_id: pkt.packet_id,
+            bundle_id: bundle.bundle_id,
+            approve_diff_sha256: None,
+        })
+        .unwrap_err();
+    assert_eq!(err.code, "ERR_VERIFY_FAILED");
 }

@@ -255,6 +255,8 @@ pub struct EvidenceSummary {
     pub tier0_pass: bool,
     pub tier1_passed: usize,
     pub tier1_total: usize,
+    pub tier2_passed: usize,
+    pub tier2_total: usize,
     pub lexicase_grade: String,
     pub widened_for_unresolved_sites: Vec<String>,
 }
