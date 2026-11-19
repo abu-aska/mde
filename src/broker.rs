@@ -1,6 +1,7 @@
 use crate::cst::{analyze_file, apply_byte_span_edits, detect_language};
 use crate::guard::{
-    check_sources, evaluate_call_policy, CallPolicyRequest, GuardOptions, GuardReport,
+    audit_code_sources, check_sources, evaluate_call_policy, CallPolicyRequest, GuardOptions,
+    GuardReport,
 };
 use crate::integrity::{verify_manifest, write_manifest, DEFAULT_MANIFEST_NAME};
 use crate::policy::{
@@ -114,6 +115,8 @@ pub struct GuardRequest {
     pub check_dupes: Option<bool>,
     #[serde(default)]
     pub check_mentions: bool,
+    #[serde(default)]
+    pub code_audit: bool,
     #[serde(default)]
     pub call_policy: Option<CallPolicyRequest>,
 }
@@ -1040,6 +1043,30 @@ impl Broker {
         let policy = PolicyConfig::load(&self.repo_root)?;
         if let Some(cp_req) = req.call_policy {
             let report = evaluate_call_policy(&self.repo_root, &cp_req, &policy);
+            return serde_json::to_value(report)
+                .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("{e}")));
+        }
+
+        if req.code_audit {
+            if req.paths.is_empty() {
+                return Err(MdeError::new(
+                    "ERR_INVALID_ARGS",
+                    "mde_guard with code_audit=true requires paths",
+                ));
+            }
+            let mut loaded: Vec<(String, String)> = Vec::with_capacity(req.paths.len());
+            for p in &req.paths {
+                let (norm, abs) = confine_path(&self.repo_root, p)?;
+                let raw_text = fs::read_to_string(&abs).map_err(|e| {
+                    MdeError::new("ERR_IO", format!("code-audit failed to read {norm}: {e}"))
+                })?;
+                loaded.push((norm, raw_text));
+            }
+            let refs: Vec<(&str, &str)> = loaded
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let report = audit_code_sources(&refs)?;
             return serde_json::to_value(report)
                 .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("{e}")));
         }

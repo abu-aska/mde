@@ -3,8 +3,8 @@ use mde::broker::{
     Broker, LocateRequest, PatchRequest, ProjectRequest, TraceRequest, VerifyRequest,
 };
 use mde::guard::{
-    check_files, check_sources, evaluate_call_policy, CallPolicyRequest, GuardOptions,
-    DEFAULT_MAX_PARAGRAPH_CHARS,
+    audit_code_paths, check_files, check_sources, evaluate_call_policy, CallPolicyRequest,
+    GuardOptions, DEFAULT_MAX_PARAGRAPH_CHARS,
 };
 use mde::integrity::{verify_manifest, write_manifest, DEFAULT_MANIFEST_NAME};
 use mde::mcp::run_stdio_server;
@@ -73,6 +73,9 @@ enum Commands {
         /// Flag standalone @-mentions
         #[arg(long)]
         check_mentions: bool,
+        /// Audit .py files for bare assert/except and .json files for duplicate keys
+        #[arg(long)]
+        code_audit: bool,
         /// Validate a JSON CallPolicyRequest file (or '-' for stdin) against repo policy
         #[arg(long)]
         call_policy: Option<String>,
@@ -123,6 +126,7 @@ fn main() {
             dupes: _,
             dupes_only,
             check_mentions,
+            code_audit,
             call_policy,
             json,
         } => {
@@ -132,6 +136,7 @@ fn main() {
                 text,
                 dupes_only,
                 check_mentions,
+                code_audit,
                 call_policy,
                 json,
             );
@@ -229,12 +234,14 @@ fn main() {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_guard_cli(
     root: &Path,
     files: Vec<String>,
     text: Option<String>,
     dupes_only: bool,
     check_mentions: bool,
+    code_audit: bool,
     call_policy: Option<String>,
     json_out: bool,
 ) -> i32 {
@@ -264,6 +271,40 @@ fn run_guard_cli(
             eprintln!("mde guard call-policy: DENIED ({})", err);
         }
         return if rep.allowed { 0 } else { 1 };
+    }
+
+    if code_audit {
+        if files.is_empty() {
+            eprintln!("usage: mde guard --code-audit <files-or-dirs...> [--json]");
+            return 3;
+        }
+        let report = match audit_code_paths(&files) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{e}");
+                return 3;
+            }
+        };
+        if json_out {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).unwrap_or_default()
+            );
+        } else if report.passed {
+            println!(
+                "mde guard --code-audit: clean ({} file(s), {} lines)",
+                report.files_checked, report.total_lines
+            );
+        } else {
+            println!(
+                "mde guard --code-audit: {} finding(s):",
+                report.findings.len()
+            );
+            for f in &report.findings {
+                println!("  {}:{}: [{}] {}", f.path, f.line, f.rule, f.message);
+            }
+        }
+        return if report.passed { 0 } else { 1 };
     }
 
     let opts = GuardOptions {

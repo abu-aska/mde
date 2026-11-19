@@ -250,7 +250,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "mde_guard",
-            "description": "Run deterministic prose, duplicate-reference, forecast, secret/path, or call-policy checks.",
+            "description": "Run deterministic prose, duplicate-reference, forecast, secret/path, verifier code-audit, or call-policy checks.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -258,6 +258,7 @@ fn tool_definitions() -> Value {
                     "text": {"type": "string"},
                     "check_dupes": {"type": "boolean"},
                     "check_mentions": {"type": "boolean"},
+                    "code_audit": {"type": "boolean"},
                     "call_policy": {"type": "object"}
                 }
             }

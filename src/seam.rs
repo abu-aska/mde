@@ -2,9 +2,9 @@ use crate::policy::confine_path;
 use crate::types::{sha256_prefixed, MdeError, MdeResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const LOCKFILE_NAMES: &[&str] = &[
     "Cargo.lock",
@@ -219,7 +219,8 @@ pub fn verify_seam_manifest(repo_root: &Path, manifest_rel: &str) -> MdeResult<S
     // 3. Vendored slice files hashing & explicit slice_hashes verification.
     let slice_dir = canon_root.join("vendor/splices").join(&slice_name);
     let mut slice_files = Vec::new();
-    collect_files_under(&canon_root, &slice_dir, &mut slice_files)?;
+    let mut visited_dirs = BTreeSet::new();
+    collect_files_under(&canon_root, &slice_dir, &mut visited_dirs, &mut slice_files)?;
     slice_files.sort();
 
     let mut tree_manifest = Vec::new();
@@ -434,19 +435,66 @@ pub fn verify_all_seams(repo_root: &Path) -> MdeResult<SeamSuiteReport> {
     })
 }
 
-fn collect_files_under(root: &Path, dir: &Path, out: &mut Vec<String>) -> MdeResult<()> {
+fn collect_files_under(
+    canon_root: &Path,
+    dir: &Path,
+    visited: &mut BTreeSet<PathBuf>,
+    out: &mut Vec<String>,
+) -> MdeResult<()> {
+    let canon_dir = fs::canonicalize(dir).map_err(|e| {
+        MdeError::new("ERR_PATH_OUT_OF_BOUNDS", format!("cannot resolve dir: {e}"))
+    })?;
+    if !canon_dir.starts_with(canon_root) {
+        return Err(MdeError::new(
+            "ERR_PATH_OUT_OF_BOUNDS",
+            "vendored directory escapes repository root",
+        ));
+    }
+    if !visited.insert(canon_dir) {
+        return Err(MdeError::new(
+            "ERR_SYMLINK_CYCLE",
+            "directory cycle detected under vendor/splices",
+        ));
+    }
+
     let entries = fs::read_dir(dir)
         .map_err(|e| MdeError::new("ERR_IO", format!("read_dir failed: {e}")))?;
-    for entry in entries.flatten() {
+    let mut sorted: Vec<_> = entries.flatten().collect();
+    sorted.sort_by_key(|e| e.file_name());
+
+    for entry in sorted {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name == "__pycache__" || name == ".DS_Store" {
             continue;
         }
         let path = entry.path();
+        let meta = fs::symlink_metadata(&path)
+            .map_err(|e| MdeError::new("ERR_IO", format!("metadata failed: {e}")))?;
+        if meta.file_type().is_symlink() {
+            let target = fs::canonicalize(&path).map_err(|e| {
+                MdeError::new(
+                    "ERR_PATH_OUT_OF_BOUNDS",
+                    format!("broken or escaping symlink in vendored slice ({name}): {e}"),
+                )
+            })?;
+            if !target.starts_with(canon_root) {
+                return Err(MdeError::new(
+                    "ERR_PATH_OUT_OF_BOUNDS",
+                    format!("symlink escapes repository root in vendored slice: {name}"),
+                ));
+            }
+            if target.is_dir() {
+                return Err(MdeError::new(
+                    "ERR_SYMLINK_CYCLE",
+                    format!("directory symlink forbidden in vendored slice: {name}"),
+                ));
+            }
+        }
+
         if path.is_dir() {
-            collect_files_under(root, &path, out)?;
+            collect_files_under(canon_root, &path, visited, out)?;
         } else if path.is_file() {
-            if let Ok(rel) = path.strip_prefix(root) {
+            if let Ok(rel) = path.strip_prefix(canon_root) {
                 out.push(rel.to_string_lossy().replace('\\', "/"));
             }
         }
@@ -456,12 +504,24 @@ fn collect_files_under(root: &Path, dir: &Path, out: &mut Vec<String>) -> MdeRes
 
 fn collect_core_files(root: &Path) -> MdeResult<Vec<String>> {
     let mut out = Vec::new();
-    walk_core(root, root, &mut out)?;
+    let mut visited = BTreeSet::new();
+    walk_core(root, root, &mut visited, &mut out)?;
     out.sort();
     Ok(out)
 }
 
-fn walk_core(root: &Path, dir: &Path, out: &mut Vec<String>) -> MdeResult<()> {
+fn walk_core(
+    root: &Path,
+    dir: &Path,
+    visited: &mut BTreeSet<PathBuf>,
+    out: &mut Vec<String>,
+) -> MdeResult<()> {
+    let Ok(canon_dir) = fs::canonicalize(dir) else {
+        return Ok(());
+    };
+    if !canon_dir.starts_with(root) || !visited.insert(canon_dir) {
+        return Ok(());
+    }
     let entries = fs::read_dir(dir)
         .map_err(|e| MdeError::new("ERR_IO", format!("read_dir failed: {e}")))?;
     for entry in entries.flatten() {
@@ -470,8 +530,13 @@ fn walk_core(root: &Path, dir: &Path, out: &mut Vec<String>) -> MdeResult<()> {
             continue;
         }
         let path = entry.path();
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+        }
         if path.is_dir() {
-            walk_core(root, &path, out)?;
+            walk_core(root, &path, visited, out)?;
         } else if path.is_file() {
             if let Ok(rel) = path.strip_prefix(root) {
                 out.push(rel.to_string_lossy().replace('\\', "/"));

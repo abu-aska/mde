@@ -38,6 +38,7 @@ pub struct IntegrityReport {
     pub manifest_present: bool,
     pub manifest_sha256: Option<String>,
     pub files_verified: usize,
+    pub empty_manifest: bool,
     pub mismatched_files: Vec<String>,
     pub missing_files: Vec<String>,
     pub unlisted_files: Vec<String>,
@@ -205,6 +206,7 @@ pub fn verify_manifest(
         manifest_present: manifest_path.is_file(),
         manifest_sha256: None,
         files_verified: 0,
+        empty_manifest: false,
         mismatched_files: Vec::new(),
         missing_files: Vec::new(),
         unlisted_files: Vec::new(),
@@ -288,7 +290,16 @@ pub fn verify_manifest(
         }
     }
 
-    let core_clean = report.mismatched_files.is_empty()
+    // Fail closed on vacuous empty manifests even when strict_unlisted is false.
+    report.empty_manifest = listed.is_empty() || report.files_verified == 0;
+    if report.empty_manifest {
+        report
+            .malformed_lines
+            .push("ERR_EMPTY_MANIFEST: manifest verified zero files".to_string());
+    }
+
+    let core_clean = !report.empty_manifest
+        && report.mismatched_files.is_empty()
         && report.missing_files.is_empty()
         && report.unconfined_paths.is_empty()
         && report.malformed_lines.is_empty()

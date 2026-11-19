@@ -6,20 +6,20 @@ Measured release-build latency and gate pass rates for `siliconcordat/mde` on a 
 
 - **Platform:** Apple M1 Max (`aarch64`, macOS 27.0.1), `rustc 1.99.1`, `cargo 1.99.1`, `--release` profile.
 - **Reproduce command:** `cargo run --release --example bench_corpus` and `cargo test`.
-- **Clean corpus:** 21 files (`181,342` bytes total): all 11 Rust source files in `src/` plus 10 clean fixtures in `tests/fixtures/` covering Rust, Python, C, TypeScript, TSX, Lean, Markdown, and JSON.
+- **Clean corpus:** 21 files (`198,756` bytes total): all 11 Rust source files in `src/` plus 10 clean fixtures in `tests/fixtures/` covering Rust, Python, C, TypeScript, TSX, Lean, Markdown, and JSON.
 - **Adversarial corpus:** 4 broken-syntax fixtures (`rust`, `python`, `c`, `typescript`) plus 2 macro-opaque fixtures (`c` `#ifdef`/`#define`, `rust` `macro_rules!`/macro invocation).
 
 ## Measured latency (release build)
 
 | Operation | Scope | Measured avg latency (ms) |
 | --- | --- | --- |
-| `analyze_file` + G1.1 0-byte round-trip | 21 clean files x 10 rounds (`181,342` B/round) | `1.800` ms / file |
-| `splice_locate` | 4 language fixtures (Rust, Python, C, TS) | `0.325` ms / call |
-| `splice_trace` | 4 language fixtures with symbol scan | `0.374` ms / call |
-| `splice_patch` | 4 language fixtures (includes `git rev-parse` + regex scan) | `27.965` ms / call |
-| `splice_verify` | 4 language fixtures in isolated scratch copy | `2.587` ms / call |
-| `mde guard` | 3 repo markdown docs (`README.md`, `PROTOCOL.md`, `PLAN.md`) x 10 rounds | `16.539` ms / run |
-| `mde zone-manifest --verify` | `schemas/zone-manifest.v0.1.json` x 10 rounds | `0.096` ms / call |
+| `analyze_file` + G1.1 0-byte round-trip | 21 clean files x 10 rounds (`198,756` B/round) | `1.934` ms / file |
+| `splice_locate` | 4 language fixtures (Rust, Python, C, TS) | `0.331` ms / call |
+| `splice_trace` | 4 language fixtures with symbol scan | `0.316` ms / call |
+| `splice_patch` | 4 language fixtures (includes `git rev-parse` + regex scan) | `24.663` ms / call |
+| `splice_verify` | 4 language fixtures in isolated scratch copy | `2.181` ms / call |
+| `mde guard` | 3 repo markdown docs (`README.md`, `PROTOCOL.md`, `PLAN.md`) x 10 rounds | `16.138` ms / run |
+| `mde zone-manifest --verify` | `schemas/zone-manifest.v0.1.json` x 10 rounds | `0.097` ms / call |
 
 `splice_patch` latency is dominated by two `git rev-parse` subprocess calls (`HEAD` and `HEAD^{tree}`) plus per-call regex compilation in secret scanning. In-process CST parsing, byte-span splicing, and SHA-256 verification take under 2 ms.
 
@@ -33,8 +33,9 @@ Measured release-build latency and gate pass rates for `siliconcordat/mde` on a 
 | G1.4 | Hard refusal (`ERR_MACRO_OPAQUE`) on C `#ifdef` and Rust macros | `2/2` languages (`100%`) | `real_corpus_g1_4_macro_opacity_refusal_in_c_and_rust` |
 | Zone manifest | Canonical 5-zone schema digest + classification (`prose`, `code`, `formal_proof`, `ui_module`, `condensed_json`) | `5/5` zones (`100%`) | `zone_manifest_schema_matches_compiled_rules_and_classifies_five_zones` |
 | Native guard | Prose tells, semicolons, duplicate refs, forecasts, secrets, local paths, call policy | `8/8` rules + `2/2` policy checks | `native_rust_guard_checks_all_rules_and_blocks_dirty_prose_splice` |
-| Plane 1 integrity | Path-confined `SHA256SUMS` / `MANIFEST.sha256` write, verify, tamper, traversal, symlink checks | `36/36` repo files (`ok: true`) | `plane1_integrity_write_verify_tamper_traversal_and_symlink_escape` |
-| Vendoring seam | Donor SHA pinning, slice hashes, One-Way Visibility, Zero Lockfile Mutation, Clean Ejection | `4/4` invariants (`100%`) | `cross_repo_seam_verifier_enforces_all_four_invariants` |
+| Code audit | Bare Python `assert`, bare `except:` / silent swallows, duplicate JSON keys | `4/4` rules (`100%`) | `code_audit_catches_bare_assert_bare_except_swallow_and_duplicate_json_keys` |
+| Plane 1 integrity | Path-confined `SHA256SUMS` / `MANIFEST.sha256` write, verify, empty-manifest fail-closed, tamper, traversal, symlink checks | `36/36` repo files (`ok: true`) | `plane1_integrity_write_verify_tamper_traversal_and_symlink_escape`, `empty_sha256sums_fails_closed_even_when_strict_unlisted_is_false` |
+| Vendoring seam | Donor SHA pinning, slice hashes, One-Way Visibility, Zero Lockfile Mutation, Clean Ejection, symlink cycle guard | `5/5` checks (`100%`) | `cross_repo_seam_verifier_enforces_all_four_invariants` |
 
 ## Real-corpus grammar finding
 

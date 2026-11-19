@@ -483,8 +483,113 @@ fn native_rust_guard_checks_all_rules_and_blocks_dirty_prose_splice() {
             text: None,
             check_dupes: Some(true),
             check_mentions: false,
+            code_audit: false,
             call_policy: None,
         })
         .unwrap();
     assert_eq!(guard_val["passed"], true);
+}
+
+#[test]
+fn code_audit_catches_bare_assert_bare_except_swallow_and_duplicate_json_keys() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join("verifiers")).unwrap();
+
+    let bad_py = concat!(
+        "def verify_claim(val):\n",
+        "    assert val > 0\n",
+        "    try:\n",
+        "        return int(val)\n",
+        "    except:\n",
+        "        pass\n",
+    );
+    let bad_json = "{\n  \"policy\": {\"allow\": true, \"allow\": false},\n  \"id\": 1\n}\n";
+    let clean_py = concat!(
+        "def verify_claim(val):\n",
+        "    if val <= 0:\n",
+        "        raise ValueError('must be positive')\n",
+        "    try:\n",
+        "        return int(val)\n",
+        "    except ValueError as exc:\n",
+        "        raise RuntimeError('invalid int') from exc\n",
+    );
+    let clean_json = "{\n  \"policy\": {\"allow\": false},\n  \"id\": 1\n}\n";
+
+    fs::write(tmp.path().join("verifiers/bad.py"), bad_py).unwrap();
+    fs::write(tmp.path().join("verifiers/dup.json"), bad_json).unwrap();
+    fs::write(tmp.path().join("verifiers/clean.py"), clean_py).unwrap();
+    fs::write(tmp.path().join("verifiers/clean.json"), clean_json).unwrap();
+
+    let broker = Broker::open(tmp.path(), false).unwrap();
+
+    // 1. Bad Python + duplicate-key JSON fail closed via Broker mde_guard(code_audit=true).
+    let bad_rep = broker
+        .mde_guard(GuardRequest {
+            paths: vec!["verifiers/bad.py".into(), "verifiers/dup.json".into()],
+            text: None,
+            check_dupes: None,
+            check_mentions: false,
+            code_audit: true,
+            call_policy: None,
+        })
+        .unwrap();
+    assert_eq!(bad_rep["passed"], false);
+    let rules: Vec<&str> = bad_rep["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["rule"].as_str().unwrap())
+        .collect();
+    assert!(rules.contains(&"bare_assert"), "missed bare_assert: {rules:?}");
+    assert!(rules.contains(&"bare_except"), "missed bare_except: {rules:?}");
+    assert!(
+        rules.contains(&"silent_except_swallow"),
+        "missed silent_except_swallow: {rules:?}"
+    );
+    assert!(
+        rules.contains(&"duplicate_json_key"),
+        "missed duplicate_json_key: {rules:?}"
+    );
+    // Confirm repo-relative paths only.
+    for f in bad_rep["findings"].as_array().unwrap() {
+        assert!(!f["path"].as_str().unwrap().starts_with('/'));
+    }
+
+    // 2. Clean Python + clean JSON pass cleanly via Broker and CLI.
+    let ok_rep = broker
+        .mde_guard(GuardRequest {
+            paths: vec!["verifiers/clean.py".into(), "verifiers/clean.json".into()],
+            text: None,
+            check_dupes: None,
+            check_mentions: false,
+            code_audit: true,
+            call_policy: None,
+        })
+        .unwrap();
+    assert_eq!(ok_rep["passed"], true);
+
+    let bin = env!("CARGO_BIN_EXE_mde");
+    let root = repo_root();
+    let schema_ok = Command::new(bin)
+        .args([
+            "guard",
+            "--code-audit",
+            root.join("schemas/zone-manifest.v0.1.json").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(schema_ok.status.success());
+
+    let cli_fail = Command::new(bin)
+        .args([
+            "guard",
+            "--code-audit",
+            tmp.path().join("verifiers/bad.py").to_str().unwrap(),
+            tmp.path().join("verifiers/dup.json").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(cli_fail.status.code(), Some(1));
 }

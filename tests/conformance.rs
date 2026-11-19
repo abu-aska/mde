@@ -1491,6 +1491,7 @@ fn mde_guard_mcp_emits_only_repo_relative_paths() {
             text: None,
             check_dupes: Some(true),
             check_mentions: false,
+            code_audit: false,
             call_policy: None,
         })
         .unwrap();
@@ -1765,4 +1766,33 @@ fn cross_repo_seam_verifier_enforces_all_four_invariants() {
         .failures
         .iter()
         .any(|f| f.invariant == "donor_pinning"));
+
+    // 6. Restore valid manifest and test cyclic directory symlink rejection in vendor/splices.
+    fs::write(
+        slice_dir.join("splice.json"),
+        serde_json::to_vec_pretty(&good_manifest).unwrap(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&slice_dir, slice_dir.join("loop_back")).unwrap();
+        let cyc_err =
+            verify_seam_manifest(tmp.path(), "vendor/splices/dawe_gpatch/splice.json").unwrap_err();
+        assert_eq!(cyc_err.code, "ERR_SYMLINK_CYCLE");
+    }
+}
+
+#[test]
+fn empty_sha256sums_fails_closed_even_when_strict_unlisted_is_false() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(tmp.path().join("README.md"), "# Doc\n").unwrap();
+    fs::write(tmp.path().join(DEFAULT_MANIFEST_NAME), "\n").unwrap();
+
+    let rep = verify_manifest(tmp.path(), DEFAULT_MANIFEST_NAME, false).unwrap();
+    assert!(!rep.ok, "empty manifest must fail closed even with strict_unlisted=false");
+    assert!(rep.empty_manifest);
+    assert!(rep
+        .malformed_lines
+        .iter()
+        .any(|l| l.contains("ERR_EMPTY_MANIFEST")));
 }

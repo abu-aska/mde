@@ -62,9 +62,11 @@ Before executing any tool call, the broker evaluates a deterministic policy chec
 
 Each located node returns `zone` and `span_bytes` inside `_meta["gg.siliconcordat/mde"]`. Higher layers never guess content zones from fragile regexes over raw prompts.
 
-### 2.5 Native prose and safety guard (`mde guard` / `mde_guard`)
+### 2.5 Native prose, code, and safety guard (`mde guard` / `mde_guard`)
 
 `mde` embeds a zero-dependency deterministic guard callable via CLI (`mde guard`), MCP (`mde_guard`), and automatically during `splice_verify` on patched `prose` files. It checks em dashes, clause-stitching semicolons, duplicate GitHub/URL references, paragraphs over 420 characters, banned AI-tell openers, outcome forecasts, secret/local-path leaks, and call-policy rules.
+
+With `--code-audit` (or `code_audit: true` over MCP), it also uses Tree-sitter Python CST and a strict streaming JSON parser to flag bare Python `assert` statements, bare `except:` or silent swallow blocks, and duplicate JSON object keys at any nesting depth.
 
 ## 3. Canonical JSON schemas (v0.1)
 
