@@ -1,7 +1,9 @@
 pub mod broker;
 pub mod cst;
 pub mod guard;
+pub mod integrity;
 pub mod mcp;
 pub mod policy;
+pub mod seam;
 pub mod types;
 pub mod zone_manifest;

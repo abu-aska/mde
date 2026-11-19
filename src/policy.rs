@@ -66,6 +66,8 @@ impl Default for PolicyConfig {
                 "splice_verify".to_string(),
                 "splice_project".to_string(),
                 "mde_guard".to_string(),
+                "mde_integrity".to_string(),
+                "mde_seam_verify".to_string(),
             ],
             max_evals: 8,
             max_wall_sec: 30,

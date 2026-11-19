@@ -1,11 +1,13 @@
 use crate::cst::{analyze_file, apply_byte_span_edits, detect_language};
 use crate::guard::{
-    check_files, check_sources, evaluate_call_policy, CallPolicyRequest, GuardOptions, GuardReport,
+    check_sources, evaluate_call_policy, CallPolicyRequest, GuardOptions, GuardReport,
 };
+use crate::integrity::{verify_manifest, write_manifest, DEFAULT_MANIFEST_NAME};
 use crate::policy::{
     classify_risk, confine_path, is_protected_oracle_path, scan_secrets_and_paths,
     validate_call_policy, AnchorSpec, PolicyConfig,
 };
+use crate::seam::{verify_all_seams, verify_seam_manifest};
 use crate::types::{
     canonical_json_sha256, sha256_prefixed, AnchorResult, BudgetUsed, CommandResult, CstEdit,
     EvidenceBundle, EvidenceSummary, GenerationProvenance, GitProjectionSpec, HumanApproval, Lane,
@@ -114,6 +116,32 @@ pub struct GuardRequest {
     pub check_mentions: bool,
     #[serde(default)]
     pub call_policy: Option<CallPolicyRequest>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IntegrityRequest {
+    /// Mode: "verify" (default) or "write"
+    #[serde(default = "default_verify_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub manifest: Option<String>,
+    #[serde(default = "default_strict_true")]
+    pub strict_unlisted: bool,
+}
+
+fn default_verify_mode() -> String {
+    "verify".to_string()
+}
+
+fn default_strict_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SeamVerifyRequest {
+    /// Optional single manifest path (vendor/splices/<name>/splice.json); if omitted, scans all.
+    #[serde(default)]
+    pub manifest_path: Option<String>,
 }
 
 pub struct Broker {
@@ -1029,12 +1057,19 @@ impl Broker {
         let report: GuardReport = if let Some(ref text) = req.text {
             check_sources(&[("<text>", text.as_str())], &opts)
         } else if !req.paths.is_empty() {
-            let mut abs_paths = Vec::with_capacity(req.paths.len());
+            let mut loaded: Vec<(String, String)> = Vec::with_capacity(req.paths.len());
             for p in &req.paths {
-                let (_, abs) = confine_path(&self.repo_root, p)?;
-                abs_paths.push(abs.to_string_lossy().into_owned());
+                let (norm, abs) = confine_path(&self.repo_root, p)?;
+                let raw_text = fs::read_to_string(&abs).map_err(|e| {
+                    MdeError::new("ERR_IO", format!("guard failed to read {norm}: {e}"))
+                })?;
+                loaded.push((norm, raw_text));
             }
-            check_files(&abs_paths, &opts)?
+            let refs: Vec<(&str, &str)> = loaded
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            check_sources(&refs, &opts)
         } else {
             return Err(MdeError::new(
                 "ERR_INVALID_ARGS",
@@ -1043,6 +1078,45 @@ impl Broker {
         };
 
         serde_json::to_value(report).map_err(|e| MdeError::new("ERR_SERIALIZE", format!("{e}")))
+    }
+
+    pub fn mde_integrity(&self, req: IntegrityRequest) -> MdeResult<serde_json::Value> {
+        let policy = PolicyConfig::load(&self.repo_root)?;
+        validate_call_policy("mde_integrity", &[], 1, false, &policy)?;
+        let manifest_name = req
+            .manifest
+            .as_deref()
+            .unwrap_or(DEFAULT_MANIFEST_NAME);
+        match req.mode.as_str() {
+            "write" => {
+                let res = write_manifest(&self.repo_root, manifest_name)?;
+                serde_json::to_value(res)
+                    .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("{e}")))
+            }
+            "verify" => {
+                let rep = verify_manifest(&self.repo_root, manifest_name, req.strict_unlisted)?;
+                serde_json::to_value(rep)
+                    .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("{e}")))
+            }
+            other => Err(MdeError::new(
+                "ERR_INVALID_ARGS",
+                format!("mde_integrity mode must be 'verify' or 'write' (got '{other}')"),
+            )),
+        }
+    }
+
+    pub fn mde_seam_verify(&self, req: SeamVerifyRequest) -> MdeResult<serde_json::Value> {
+        let policy = PolicyConfig::load(&self.repo_root)?;
+        validate_call_policy("mde_seam_verify", &[], 1, false, &policy)?;
+        if let Some(ref manifest_path) = req.manifest_path {
+            let rep = verify_seam_manifest(&self.repo_root, manifest_path)?;
+            serde_json::to_value(rep)
+                .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("{e}")))
+        } else {
+            let suite = verify_all_seams(&self.repo_root)?;
+            serde_json::to_value(suite)
+                .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("{e}")))
+        }
     }
 
     fn persist_packet(&self, packet: &SplicePacket) -> MdeResult<()> {

@@ -1,9 +1,11 @@
 use mde::broker::{
-    Broker, LocateRequest, PatchEditInput, PatchRequest, ProjectRequest, TraceRequest,
-    VerifyRequest,
+    Broker, GuardRequest, IntegrityRequest, LocateRequest, PatchEditInput, PatchRequest,
+    ProjectRequest, SeamVerifyRequest, TraceRequest, VerifyRequest,
 };
 use mde::cst::apply_byte_span_edits;
+use mde::integrity::{verify_manifest, write_manifest, ALT_MANIFEST_NAME, DEFAULT_MANIFEST_NAME};
 use mde::policy::{confine_path, AnchorSpec, PolicyConfig};
+use mde::seam::{verify_all_seams, verify_seam_manifest};
 use mde::types::{sha256_prefixed, RiskClass, Zone, MDE_META_NAMESPACE};
 use serde_json::{json, Value};
 use std::fs;
@@ -921,7 +923,9 @@ fn live_jsonrpc_stdio_mcp_roundtrip_end_to_end() {
             "splice_patch",
             "splice_verify",
             "splice_project",
-            "mde_guard"
+            "mde_guard",
+            "mde_integrity",
+            "mde_seam_verify"
         ]
     );
 
@@ -1467,4 +1471,298 @@ fn dot_mde_policy_oracle_tampering_is_detected() {
         })
         .unwrap_err();
     assert_eq!(err.code, "ERR_VERIFY_FAILED");
+}
+
+#[test]
+fn mde_guard_mcp_emits_only_repo_relative_paths() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join("docs")).unwrap();
+    fs::write(
+        tmp.path().join("docs/dirty.md"),
+        "Notably, this has an em dash \u{2014} and should fail.\n",
+    )
+    .unwrap();
+
+    // 1. Direct Broker::mde_guard check
+    let broker = Broker::open(tmp.path(), false).unwrap();
+    let val = broker
+        .mde_guard(GuardRequest {
+            paths: vec!["docs/dirty.md".into()],
+            text: None,
+            check_dupes: Some(true),
+            check_mentions: false,
+            call_policy: None,
+        })
+        .unwrap();
+    assert_eq!(val["passed"], false);
+    let findings = val["findings"].as_array().unwrap();
+    assert!(!findings.is_empty());
+    let host_root = tmp.path().to_string_lossy().into_owned();
+    for f in findings {
+        let p = f["path"].as_str().unwrap();
+        assert_eq!(p, "docs/dirty.md");
+        assert!(!p.starts_with('/'), "finding path leaked leading slash: {p}");
+        assert!(
+            !p.contains(&host_root),
+            "finding path leaked host root: {p}"
+        );
+    }
+
+    // 2. Live stdio MCP mde_guard response must not leak host absolute paths anywhere.
+    let bin = env!("CARGO_BIN_EXE_mde");
+    let mut child = Command::new(bin)
+        .args(["--root", tmp.path().to_str().unwrap(), "mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mde mcp");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "mde_guard",
+            "arguments": {"paths": ["docs/dirty.md"]}
+        }
+    });
+    writeln!(stdin, "{}", serde_json::to_string(&req).unwrap()).unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+
+    assert!(
+        !line.contains(&host_root),
+        "MCP mde_guard payload leaked host path: {line}"
+    );
+    let resp: Value = serde_json::from_str(&line).unwrap();
+    for f in resp["result"]["structuredContent"]["findings"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(f["path"], "docs/dirty.md");
+    }
+}
+
+#[test]
+fn plane1_integrity_write_verify_tamper_traversal_and_symlink_escape() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join("principles")).unwrap();
+    fs::create_dir_all(tmp.path().join("sops")).unwrap();
+    fs::write(tmp.path().join("principles/ethos.md"), "# Ethos\n").unwrap();
+    fs::write(tmp.path().join("sops/shipping.md"), "# Shipping\n").unwrap();
+
+    // 1. Write SHA256SUMS and MANIFEST.sha256 deterministically.
+    let w1 = write_manifest(tmp.path(), DEFAULT_MANIFEST_NAME).unwrap();
+    let first_bytes = fs::read(tmp.path().join(DEFAULT_MANIFEST_NAME)).unwrap();
+    let w2 = write_manifest(tmp.path(), DEFAULT_MANIFEST_NAME).unwrap();
+    let second_bytes = fs::read(tmp.path().join(DEFAULT_MANIFEST_NAME)).unwrap();
+    assert_eq!(w1.files_hashed, 2);
+    assert_eq!(w1.manifest_sha256, w2.manifest_sha256);
+    assert_eq!(first_bytes, second_bytes);
+
+    let w_alt = write_manifest(tmp.path(), ALT_MANIFEST_NAME).unwrap();
+    assert_eq!(w_alt.manifest_sha256, w1.manifest_sha256);
+
+    // 2. Clean verification passes via library, CLI, and Broker.
+    let clean = verify_manifest(tmp.path(), DEFAULT_MANIFEST_NAME, true).unwrap();
+    assert!(clean.ok);
+    assert_eq!(clean.files_verified, 2);
+
+    let bin = env!("CARGO_BIN_EXE_mde");
+    let cli_ok = Command::new(bin)
+        .args([
+            "--root",
+            tmp.path().to_str().unwrap(),
+            "integrity",
+            "--verify",
+        ])
+        .output()
+        .unwrap();
+    assert!(cli_ok.status.success());
+
+    let broker = Broker::open(tmp.path(), false).unwrap();
+    let mcp_ok = broker
+        .mde_integrity(IntegrityRequest {
+            mode: "verify".into(),
+            manifest: Some(ALT_MANIFEST_NAME.into()),
+            strict_unlisted: true,
+        })
+        .unwrap();
+    assert_eq!(mcp_ok["ok"], true);
+
+    // 3. Detect modified file.
+    fs::write(tmp.path().join("principles/ethos.md"), "# Tampered\n").unwrap();
+    let mod_rep = verify_manifest(tmp.path(), DEFAULT_MANIFEST_NAME, true).unwrap();
+    assert!(!mod_rep.ok);
+    assert_eq!(mod_rep.mismatched_files, vec!["principles/ethos.md"]);
+    fs::write(tmp.path().join("principles/ethos.md"), "# Ethos\n").unwrap();
+
+    // 4. Detect unlisted extra file under strict mode.
+    fs::write(tmp.path().join("sops/rogue.md"), "# Extra\n").unwrap();
+    let extra_rep = verify_manifest(tmp.path(), DEFAULT_MANIFEST_NAME, true).unwrap();
+    assert!(!extra_rep.ok);
+    assert_eq!(extra_rep.unlisted_files, vec!["sops/rogue.md"]);
+    fs::remove_file(tmp.path().join("sops/rogue.md")).unwrap();
+
+    // 5. Detect missing file.
+    fs::remove_file(tmp.path().join("sops/shipping.md")).unwrap();
+    let miss_rep = verify_manifest(tmp.path(), DEFAULT_MANIFEST_NAME, true).unwrap();
+    assert!(!miss_rep.ok);
+    assert_eq!(miss_rep.missing_files, vec!["sops/shipping.md"]);
+    fs::write(tmp.path().join("sops/shipping.md"), "# Shipping\n").unwrap();
+
+    // 6. Reject path traversal entry injected into SHA256SUMS.
+    let bad_hash = "0".repeat(64);
+    let mut poisoned = fs::read_to_string(tmp.path().join(DEFAULT_MANIFEST_NAME)).unwrap();
+    poisoned.push_str(&format!("{bad_hash}  ../outside.txt\n"));
+    fs::write(tmp.path().join(DEFAULT_MANIFEST_NAME), poisoned).unwrap();
+    let trav_rep = verify_manifest(tmp.path(), DEFAULT_MANIFEST_NAME, true).unwrap();
+    assert!(!trav_rep.ok);
+    assert_eq!(trav_rep.unconfined_paths.len(), 1);
+    assert_eq!(trav_rep.unconfined_paths[0].path, "../outside.txt");
+
+    // 7. Reject escaping symlink on Unix.
+    #[cfg(unix)]
+    {
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.txt");
+        fs::write(&secret, "do-not-read").unwrap();
+        std::os::unix::fs::symlink(&secret, tmp.path().join("sops/escape_link.md")).unwrap();
+        let sym_err = write_manifest(tmp.path(), DEFAULT_MANIFEST_NAME).unwrap_err();
+        assert_eq!(sym_err.code, "ERR_PATH_OUT_OF_BOUNDS");
+    }
+}
+
+#[test]
+fn cross_repo_seam_verifier_enforces_all_four_invariants() {
+    let tmp = TempDir::new().unwrap();
+    let slice_dir = tmp.path().join("vendor/splices/dawe_gpatch");
+    fs::create_dir_all(&slice_dir).unwrap();
+    fs::create_dir_all(tmp.path().join("src")).unwrap();
+
+    let slice_py = "def identify(ckpt):\n    return ckpt\n";
+    let seam_py = concat!(
+        "WMCP_TOOLS = ['wmcp_checkpoint_identify']\n",
+        "def dispatch_wmcp_tool(name):\n",
+        "    return name\n",
+    );
+    let lock_body = "version = 1\n# host lockfile\n";
+    fs::write(slice_dir.join("slice.py"), slice_py).unwrap();
+    fs::write(slice_dir.join("seam.py"), seam_py).unwrap();
+    fs::write(tmp.path().join("src/core.py"), "def core_fn():\n    return 1\n").unwrap();
+    fs::write(tmp.path().join("uv.lock"), lock_body).unwrap();
+
+    let slice_hash = sha256_prefixed(slice_py.as_bytes());
+    let seam_hash = sha256_prefixed(seam_py.as_bytes());
+    let lock_hash = sha256_prefixed(lock_body.as_bytes());
+
+    let good_manifest = json!({
+        "splice_version": "0.1.0",
+        "capability": "dawe_geodesic_patch",
+        "donor": {
+            "uri": "https://github.com/bandr-ai/dawe",
+            "commit": "2a8fc20a222effd6d19d20b024f3a178447ddc1e",
+            "license": "Apache-2.0",
+            "entry_symbols": ["identify"]
+        },
+        "severance_map": {
+            "dawe.telemetry": "stdlib://none"
+        },
+        "seam": {
+            "path": "vendor/splices/dawe_gpatch/seam.py",
+            "exports": ["WMCP_TOOLS", "dispatch_wmcp_tool"]
+        },
+        "verification": {
+            "command": "python3 -m unittest",
+            "max_host_files_touched": 0
+        },
+        "slice_hashes": {
+            "vendor/splices/dawe_gpatch/slice.py": slice_hash,
+            "vendor/splices/dawe_gpatch/seam.py": seam_hash
+        },
+        "host_lockfile_hashes": {
+            "uv.lock": lock_hash
+        }
+    });
+    fs::write(
+        slice_dir.join("splice.json"),
+        serde_json::to_vec_pretty(&good_manifest).unwrap(),
+    )
+    .unwrap();
+
+    // 1. Clean vendored seam passes library, CLI, and Broker MCP checks.
+    let ok_rep = verify_seam_manifest(tmp.path(), "vendor/splices/dawe_gpatch/splice.json").unwrap();
+    assert!(ok_rep.ok, "unexpected failures: {:?}", ok_rep.failures);
+    assert!(ok_rep.one_way_visibility_ok);
+    assert!(ok_rep.zero_lockfile_mutation_ok);
+    assert!(ok_rep.clean_ejection_ok);
+    assert_eq!(ok_rep.slice_files_checked, 3);
+
+    let suite = verify_all_seams(tmp.path()).unwrap();
+    assert!(suite.ok);
+    assert_eq!(suite.slices_verified, 1);
+
+    let bin = env!("CARGO_BIN_EXE_mde");
+    let cli_ok = Command::new(bin)
+        .args(["--root", tmp.path().to_str().unwrap(), "seam-verify"])
+        .output()
+        .unwrap();
+    assert!(cli_ok.status.success());
+
+    let broker = Broker::open(tmp.path(), false).unwrap();
+    let broker_ok = broker
+        .mde_seam_verify(SeamVerifyRequest {
+            manifest_path: Some("vendor/splices/dawe_gpatch/splice.json".into()),
+        })
+        .unwrap();
+    assert_eq!(broker_ok["ok"], true);
+
+    // 2. Slice hash tamper fails closed.
+    fs::write(slice_dir.join("slice.py"), "def identify(ckpt):\n    return None\n").unwrap();
+    let tamper = verify_seam_manifest(tmp.path(), "vendor/splices/dawe_gpatch/splice.json").unwrap();
+    assert!(!tamper.ok);
+    assert!(tamper.failures.iter().any(|f| f.invariant == "slice_hash"));
+    fs::write(slice_dir.join("slice.py"), slice_py).unwrap();
+
+    // 3. One-Way Visibility & Clean Ejection violation when core imports vendor/splices.
+    fs::write(
+        tmp.path().join("src/core.py"),
+        "from vendor.splices.dawe_gpatch import slice\n",
+    )
+    .unwrap();
+    let vis = verify_seam_manifest(tmp.path(), "vendor/splices/dawe_gpatch/splice.json").unwrap();
+    assert!(!vis.ok);
+    assert!(!vis.one_way_visibility_ok);
+    assert!(!vis.clean_ejection_ok);
+    fs::write(tmp.path().join("src/core.py"), "def core_fn():\n    return 1\n").unwrap();
+
+    // 4. Zero Lockfile Mutation failure when host lockfile changes.
+    fs::write(tmp.path().join("uv.lock"), "version = 2 # mutated\n").unwrap();
+    let lock_fail =
+        verify_seam_manifest(tmp.path(), "vendor/splices/dawe_gpatch/splice.json").unwrap();
+    assert!(!lock_fail.ok);
+    assert!(!lock_fail.zero_lockfile_mutation_ok);
+    fs::write(tmp.path().join("uv.lock"), lock_body).unwrap();
+
+    // 5. Mutable donor commit ("main") fails donor_pinning.
+    let mut bad_manifest = good_manifest.clone();
+    bad_manifest["donor"]["commit"] = json!("main");
+    fs::write(
+        slice_dir.join("splice.json"),
+        serde_json::to_vec_pretty(&bad_manifest).unwrap(),
+    )
+    .unwrap();
+    let donor_fail =
+        verify_seam_manifest(tmp.path(), "vendor/splices/dawe_gpatch/splice.json").unwrap();
+    assert!(!donor_fail.ok);
+    assert!(donor_fail
+        .failures
+        .iter()
+        .any(|f| f.invariant == "donor_pinning"));
 }

@@ -16,6 +16,7 @@ Standard MCP servers dump large tool lists and prose rules into prompts on every
 - **Protected test locks:** Paths marked as tests or anchors cannot be edited during normal code changes.
 - **Zone classification:** Each located span carries a syntactic zone tag (`prose`, `code`, `formal_proof`, `ui_module`, or `condensed_json`) compiled from `schemas/zone-manifest.v0.1.json` so the Layer 4 harness (`exo`) and Layer 2 model runtime (`weft`) can pick the right checks and adapter scales.
 - **Native prose and safety guard:** `mde guard` checks markdown and text for em dashes, clause semicolons, duplicate references, long paragraphs, AI-tell phrases, outcome forecasts, leaked secrets, local home paths, and tool call-policy violations with zero Python dependencies.
+- **Plane 1 integrity and vendoring seams:** `mde integrity` writes and verifies path-confined `SHA256SUMS` and `MANIFEST.sha256` manifests. `mde seam-verify` validates `vendor/splices/<name>/splice.json` manifests for donor SHA pinning, slice hashes, One-Way Visibility, Zero Lockfile Mutation, and Clean Ejection.
 - **Plain Git output:** Verified changes project to normal minimal Git commits. Any engineer can edit files with a plain text editor and commit with standard `git`.
 
 ## Stack position
@@ -45,6 +46,8 @@ cargo test
 cargo run -- locate src/cst.rs
 cargo run -- guard README.md PROTOCOL.md PLAN.md
 cargo run -- zone-manifest --verify schemas/zone-manifest.v0.1.json
+cargo run -- integrity --verify
+cargo run -- seam-verify
 cargo run -- mcp
 ```
 

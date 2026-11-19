@@ -1,5 +1,6 @@
 use crate::broker::{
-    Broker, GuardRequest, LocateRequest, PatchRequest, ProjectRequest, TraceRequest, VerifyRequest,
+    Broker, GuardRequest, IntegrityRequest, LocateRequest, PatchRequest, ProjectRequest,
+    SeamVerifyRequest, TraceRequest, VerifyRequest,
 };
 use crate::types::{MdeError, MdeResult, MDE_META_NAMESPACE, MDE_VERSION};
 use serde_json::{json, Value};
@@ -131,6 +132,12 @@ fn handle_tool_call(broker: &mut Broker, req_id: Value, params: &Value) -> Value
         "mde_guard" => serde_json::from_value::<GuardRequest>(args)
             .map_err(|e| MdeError::new("ERR_INVALID_ARGS", format!("{e}")))
             .and_then(|r| broker.mde_guard(r)),
+        "mde_integrity" => serde_json::from_value::<IntegrityRequest>(args)
+            .map_err(|e| MdeError::new("ERR_INVALID_ARGS", format!("{e}")))
+            .and_then(|r| broker.mde_integrity(r)),
+        "mde_seam_verify" => serde_json::from_value::<SeamVerifyRequest>(args)
+            .map_err(|e| MdeError::new("ERR_INVALID_ARGS", format!("{e}")))
+            .and_then(|r| broker.mde_seam_verify(r)),
         _ => Err(MdeError::new(
             "ERR_UNKNOWN_TOOL",
             format!("unknown tool: {name}"),
@@ -252,6 +259,28 @@ fn tool_definitions() -> Value {
                     "check_dupes": {"type": "boolean"},
                     "check_mentions": {"type": "boolean"},
                     "call_policy": {"type": "object"}
+                }
+            }
+        },
+        {
+            "name": "mde_integrity",
+            "description": "Write or verify path-confined Plane 1 SHA256SUMS or MANIFEST.sha256 integrity manifests.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["verify", "write"]},
+                    "manifest": {"type": "string"},
+                    "strict_unlisted": {"type": "boolean"}
+                }
+            }
+        },
+        {
+            "name": "mde_seam_verify",
+            "description": "Verify cross-repo capability vendoring manifests under vendor/splices/<name>/splice.json.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "manifest_path": {"type": "string"}
                 }
             }
         }

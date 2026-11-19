@@ -193,18 +193,18 @@ Any 1-byte change to `base_tree`, `result_tree`, or protected oracle files inval
 
 ## 4. Sibling seam: cross-repo capability vendoring (`vendor/splices/`)
 
-Intra-repo CST editing (Section 2) is separate from cross-repo capability vendoring. When a host repository imports a self-contained slice from an upstream donor repository, it follows the vendoring seam:
+Intra-repo CST editing (Section 2) is separate from cross-repo capability vendoring. When a host repository imports a self-contained slice from an upstream donor repository, it follows the vendoring seam checked by `mde seam-verify` (and MCP `mde_seam_verify`):
 
-- Store the vendored slice under `vendor/splices/<capability_name>/` with a `splice.json` manifest recording donor repo, commit SHA, license, extracted files, and SHA-256 digests.
-- Keep core repository code isolated behind one small adapter module (`seam`) so the vendored slice can be removed cleanly without altering core packages or lockfiles.
+- Store the vendored slice under `vendor/splices/<capability_name>/` with a `splice.json` manifest recording donor URI, pinned hex commit SHA, license, seam exports, optional `slice_hashes`, and optional `host_lockfile_hashes`.
+- Enforce four invariants mechanically: donor commit pinning, One-Way Visibility (core code never imports `vendor/splices/`), Zero Lockfile Mutation, and Clean Ejection (deleting the slice directory breaks zero core files or build manifests).
 
 ## 5. Plane 1 integrity and causal lineage (formerly MEP, now MDE)
 
-MDE carries forward the Plane 1 text integrity model previously named MEP (name change only, concepts unchanged):
+MDE carries forward the Plane 1 text integrity model previously named MEP (name change only, concepts unchanged), implemented natively via `mde integrity --write` / `--verify` (and MCP `mde_integrity`):
 
-- **Authoritative text layout:** Human-authored principles, operating procedures, skills, and design docs live in plain versioned files with a `SHA256SUMS` manifest.
-- **Causal lineage:** Revisions point to parent digests. Contested heads never resolve automatically and escalate to the owner.
-- **Zero hidden authority:** Reading a Plane 1 document supplies pinned context only. It never grants execution, merge, or spend permission.
+- **Authoritative text layout:** Human-authored principles, operating procedures, skills, and design docs live in plain versioned files covered by sorted, path-confined `SHA256SUMS` or `MANIFEST.sha256` manifests.
+- **Path confinement:** Verification fails closed on absolute paths, `..` traversal, escaping symlinks, malformed lines, duplicates, missing files, modified files, and unlisted extra files.
+- **Causal lineage and zero hidden authority:** Revisions point to parent digests. Contested heads escalate to the owner. Reading a Plane 1 document supplies pinned context only and never grants execution, merge, or spend permission.
 
 ## 6. Profile B: W-MCP weight-slot lifecycle (vendor-namespaced `_meta`)
 

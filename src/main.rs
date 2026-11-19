@@ -6,8 +6,10 @@ use mde::guard::{
     check_files, check_sources, evaluate_call_policy, CallPolicyRequest, GuardOptions,
     DEFAULT_MAX_PARAGRAPH_CHARS,
 };
+use mde::integrity::{verify_manifest, write_manifest, DEFAULT_MANIFEST_NAME};
 use mde::mcp::run_stdio_server;
 use mde::policy::PolicyConfig;
+use mde::seam::{verify_all_seams, verify_seam_manifest};
 use mde::types::{MdeError, MdeResult};
 use mde::zone_manifest::{build_zone_manifest, verify_zone_manifest_file};
 use std::fs;
@@ -87,6 +89,26 @@ enum Commands {
         #[arg(long)]
         verify: Option<PathBuf>,
     },
+    /// Write or verify Plane 1 SHA256SUMS / MANIFEST.sha256 integrity manifests
+    Integrity {
+        /// Rewrite manifest from the repository tree
+        #[arg(long, conflicts_with = "verify")]
+        write: bool,
+        /// Verify repository tree against manifest
+        #[arg(long, conflicts_with = "write")]
+        verify: bool,
+        /// Manifest filename at repository root (SHA256SUMS or MANIFEST.sha256)
+        #[arg(long, default_value = DEFAULT_MANIFEST_NAME)]
+        manifest: String,
+        /// Do not fail verification on unlisted files (report only)
+        #[arg(long)]
+        allow_unlisted: bool,
+    },
+    /// Verify cross-repo capability vendoring manifests under vendor/splices/<name>/splice.json
+    SeamVerify {
+        /// Optional single manifest path; omit to scan all vendor/splices/*/splice.json
+        manifest_path: Option<String>,
+    },
     /// Start JSON-RPC 2.0 stdio MCP server
     Mcp,
 }
@@ -124,6 +146,19 @@ fn main() {
                 process::exit(1);
             }
             return;
+        }
+        Commands::Integrity {
+            write,
+            verify,
+            manifest,
+            allow_unlisted,
+        } => {
+            let code = run_integrity_cli(&cli.root, write, verify, &manifest, !allow_unlisted);
+            process::exit(code);
+        }
+        Commands::SeamVerify { manifest_path } => {
+            let code = run_seam_verify_cli(&cli.root, manifest_path);
+            process::exit(code);
         }
         _ => {}
     }
@@ -179,7 +214,10 @@ fn main() {
             let stdout = io::stdout();
             run_stdio_server(&mut broker, BufReader::new(stdin.lock()), stdout.lock())
         }
-        Commands::Guard { .. } | Commands::ZoneManifest { .. } => unreachable!(),
+        Commands::Guard { .. }
+        | Commands::ZoneManifest { .. }
+        | Commands::Integrity { .. }
+        | Commands::SeamVerify { .. } => unreachable!(),
     };
 
     if let Err(err) = result {
@@ -297,6 +335,83 @@ fn run_zone_manifest_cli(out: Option<PathBuf>, verify: Option<PathBuf>) -> MdeRe
         println!("{encoded}");
     }
     Ok(())
+}
+
+fn run_integrity_cli(
+    root: &Path,
+    write: bool,
+    verify: bool,
+    manifest: &str,
+    strict_unlisted: bool,
+) -> i32 {
+    if !write && !verify {
+        eprintln!("usage: mde integrity --write | --verify [--manifest SHA256SUMS]");
+        return 2;
+    }
+    if write {
+        match write_manifest(root, manifest) {
+            Ok(res) => {
+                let _ = print_json(res);
+                0
+            }
+            Err(err) => {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&err).unwrap_or_else(|_| err.to_string())
+                );
+                1
+            }
+        }
+    } else {
+        match verify_manifest(root, manifest, strict_unlisted) {
+            Ok(rep) => {
+                let ok = rep.ok;
+                let _ = print_json(rep);
+                if ok { 0 } else { 1 }
+            }
+            Err(err) => {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&err).unwrap_or_else(|_| err.to_string())
+                );
+                1
+            }
+        }
+    }
+}
+
+fn run_seam_verify_cli(root: &Path, manifest_path: Option<String>) -> i32 {
+    if let Some(rel) = manifest_path {
+        match verify_seam_manifest(root, &rel) {
+            Ok(rep) => {
+                let ok = rep.ok;
+                let _ = print_json(rep);
+                if ok { 0 } else { 1 }
+            }
+            Err(err) => {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&err).unwrap_or_else(|_| err.to_string())
+                );
+                1
+            }
+        }
+    } else {
+        match verify_all_seams(root) {
+            Ok(suite) => {
+                let ok = suite.ok;
+                let _ = print_json(suite);
+                if ok { 0 } else { 1 }
+            }
+            Err(err) => {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&err).unwrap_or_else(|_| err.to_string())
+                );
+                1
+            }
+        }
+    }
 }
 
 fn read_json_input(spec: &str) -> MdeResult<String> {
