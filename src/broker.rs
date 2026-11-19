@@ -1,4 +1,7 @@
 use crate::cst::{analyze_file, apply_byte_span_edits, detect_language};
+use crate::guard::{
+    check_files, check_sources, evaluate_call_policy, CallPolicyRequest, GuardOptions, GuardReport,
+};
 use crate::policy::{
     classify_risk, confine_path, is_protected_oracle_path, scan_secrets_and_paths,
     validate_call_policy, AnchorSpec, PolicyConfig,
@@ -8,7 +11,7 @@ use crate::types::{
     EvidenceBundle, EvidenceSummary, GenerationProvenance, GitProjectionSpec, HumanApproval, Lane,
     LocateResult, LocatedSymbol, MdeError, MdeMetaPayload, MdeResult, OracleIntegrity,
     ProjectResult, ReadProof, ReferenceHit, RiskClass, SeamContract, SplicePacket,
-    ToolchainDigest, TraceResult, EVIDENCE_BUNDLE_SCHEMA, MDE_META_NAMESPACE, MDE_VERSION,
+    ToolchainDigest, TraceResult, Zone, EVIDENCE_BUNDLE_SCHEMA, MDE_META_NAMESPACE, MDE_VERSION,
     SPLICE_PACKET_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
@@ -97,6 +100,20 @@ pub struct ProjectRequest {
     pub bundle_id: String,
     #[serde(default)]
     pub approve_diff_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GuardRequest {
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub check_dupes: Option<bool>,
+    #[serde(default)]
+    pub check_mentions: bool,
+    #[serde(default)]
+    pub call_policy: Option<CallPolicyRequest>,
 }
 
 pub struct Broker {
@@ -696,6 +713,47 @@ impl Broker {
             });
         }
 
+        // Automatic native prose + safety guard on patched Zone::Prose files when enabled.
+        if policy.enforce_prose_guard {
+            let prose_opts = GuardOptions {
+                check_prose: true,
+                check_dupes: true,
+                check_secrets: true,
+                check_mentions: false,
+                max_paragraph_chars: crate::guard::DEFAULT_MAX_PARAGRAPH_CHARS,
+                max_trace_bytes: policy.max_trace_bytes,
+                extra_forbidden_patterns: policy.extra_forbidden_patterns.clone(),
+            };
+            for (rel_path, bytes) in &patched_map {
+                let parsed = analyze_file(rel_path, bytes)?;
+                if parsed.dominant_zone == Zone::Prose {
+                    let t0 = Instant::now();
+                    let text = String::from_utf8_lossy(bytes);
+                    let rep = check_sources(&[(rel_path.as_str(), text.as_ref())], &prose_opts);
+                    let rep_json = serde_json::to_vec(&rep).unwrap_or_default();
+                    tier1_total += 1;
+                    if rep.passed {
+                        tier1_passed += 1;
+                    } else {
+                        any_anchor_failed = true;
+                    }
+                    anchor_results.push(AnchorResult {
+                        anchor_id: format!("mde_prose_guard:{rel_path}"),
+                        tier: 1,
+                        visibility: "visible".to_string(),
+                        zone: "A".to_string(),
+                        cmd: vec!["mde".to_string(), "guard".to_string(), rel_path.clone()],
+                        exit_code: if rep.passed { 0 } else { 1 },
+                        passed: rep.passed,
+                        duration_ms: t0.elapsed().as_millis() as u64,
+                        stdout_sha256: sha256_prefixed(&rep_json),
+                        stderr_sha256: sha256_prefixed(b""),
+                        cassette_sha256: None,
+                    });
+                }
+            }
+        }
+
         // Gate G3.4: verify protected oracle files were untouched during verification.
         let post_oracle_sha = hash_protected_oracles(work_dir, policy)?;
         let tamper_free = pre_oracle_sha == post_oracle_sha;
@@ -950,6 +1008,43 @@ impl Broker {
         })
     }
 
+    pub fn mde_guard(&self, req: GuardRequest) -> MdeResult<serde_json::Value> {
+        let policy = PolicyConfig::load(&self.repo_root)?;
+        if let Some(cp_req) = req.call_policy {
+            let report = evaluate_call_policy(&self.repo_root, &cp_req, &policy);
+            return serde_json::to_value(report)
+                .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("{e}")));
+        }
+
+        let opts = GuardOptions {
+            check_prose: true,
+            check_dupes: req.check_dupes.unwrap_or(true),
+            check_secrets: true,
+            check_mentions: req.check_mentions,
+            max_paragraph_chars: crate::guard::DEFAULT_MAX_PARAGRAPH_CHARS,
+            max_trace_bytes: policy.max_trace_bytes,
+            extra_forbidden_patterns: policy.extra_forbidden_patterns.clone(),
+        };
+
+        let report: GuardReport = if let Some(ref text) = req.text {
+            check_sources(&[("<text>", text.as_str())], &opts)
+        } else if !req.paths.is_empty() {
+            let mut abs_paths = Vec::with_capacity(req.paths.len());
+            for p in &req.paths {
+                let (_, abs) = confine_path(&self.repo_root, p)?;
+                abs_paths.push(abs.to_string_lossy().into_owned());
+            }
+            check_files(&abs_paths, &opts)?
+        } else {
+            return Err(MdeError::new(
+                "ERR_INVALID_ARGS",
+                "mde_guard requires paths, text, or call_policy",
+            ));
+        };
+
+        serde_json::to_value(report).map_err(|e| MdeError::new("ERR_SERIALIZE", format!("{e}")))
+    }
+
     fn persist_packet(&self, packet: &SplicePacket) -> MdeResult<()> {
         let dir = self.repo_root.join(".mde/packets");
         fs::create_dir_all(&dir)
@@ -965,10 +1060,10 @@ impl Broker {
         validate_digest_id(packet_id, "packet_id")?;
         let fname = format!("{}.json", packet_id.replace(':', "_"));
         let path = self.repo_root.join(".mde/packets").join(fname);
-        let raw = fs::read_to_string(&path).map_err(|e| {
+        let raw_text = fs::read_to_string(&path).map_err(|e| {
             MdeError::new("ERR_PACKET_NOT_FOUND", format!("packet {packet_id}: {e}"))
         })?;
-        let packet: SplicePacket = serde_json::from_str(&raw)
+        let packet: SplicePacket = serde_json::from_str(&raw_text)
             .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("corrupt packet: {e}")))?;
         let computed = canonical_json_sha256(&packet, Some("packet_id"))?;
         if computed != packet_id || packet.packet_id != packet_id {
@@ -996,10 +1091,10 @@ impl Broker {
         validate_digest_id(bundle_id, "bundle_id")?;
         let fname = format!("{}.json", bundle_id.replace(':', "_"));
         let path = self.repo_root.join(".mde/bundles").join(fname);
-        let raw = fs::read_to_string(&path).map_err(|e| {
+        let raw_text = fs::read_to_string(&path).map_err(|e| {
             MdeError::new("ERR_BUNDLE_NOT_FOUND", format!("bundle {bundle_id}: {e}"))
         })?;
-        let bundle: EvidenceBundle = serde_json::from_str(&raw)
+        let bundle: EvidenceBundle = serde_json::from_str(&raw_text)
             .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("corrupt bundle: {e}")))?;
         let computed = canonical_json_sha256(&bundle, Some("bundle_id"))?;
         if computed != bundle_id || bundle.bundle_id != bundle_id {
@@ -1048,8 +1143,8 @@ fn new_token_store() -> TokenStore {
 
 fn load_token_store(repo_root: &Path) -> Option<TokenStore> {
     let path = repo_root.join(".mde/session_tokens.json");
-    let raw = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
+    let raw_text = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw_text).ok()
 }
 
 fn git_rev_parse(repo_root: &Path, rev: &str) -> Option<String> {

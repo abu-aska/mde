@@ -14,7 +14,8 @@ Standard MCP servers dump large tool lists and prose rules into prompts on every
 - **Byte-exact syntax edits:** Tree-sitter parses Rust, Python, C, and TypeScript into concrete syntax trees (CSTs). Edits splice raw byte ranges so untouched comments, blank lines, and directives stay byte-identical.
 - **Hard refusals on unsafe syntax:** Edits inside Tree-sitter `ERROR` or `MISSING` nodes, or inside C preprocessor and Rust macro regions, are rejected before writing a byte.
 - **Protected test locks:** Paths marked as tests or anchors cannot be edited during normal code changes.
-- **Zone classification:** Each located span carries a syntactic zone tag (`prose`, `code`, `formal_proof`, or `ui_module`) so the Layer 4 harness (`exo`) and Layer 2 model runtime (`weft`) can pick the right checks and adapter scales.
+- **Zone classification:** Each located span carries a syntactic zone tag (`prose`, `code`, `formal_proof`, `ui_module`, or `condensed_json`) compiled from `schemas/zone-manifest.v0.1.json` so the Layer 4 harness (`exo`) and Layer 2 model runtime (`weft`) can pick the right checks and adapter scales.
+- **Native prose and safety guard:** `mde guard` checks markdown and text for em dashes, clause semicolons, duplicate references, long paragraphs, AI-tell phrases, outcome forecasts, leaked secrets, local home paths, and tool call-policy violations with zero Python dependencies.
 - **Plain Git output:** Verified changes project to normal minimal Git commits. Any engineer can edit files with a plain text editor and commit with standard `git`.
 
 ## Stack position
@@ -33,13 +34,17 @@ Standard MCP servers dump large tool lists and prose rules into prompts on every
 
 - `PROTOCOL.md`: Complete L5 wire protocol, 5-verb contract, JSON schemas, call guard rules, Plane 1 lineage, and vendor-namespaced weight-slot `_meta`.
 - `PLAN.md`: Implementation milestones, conformance gates, and explicit deferrals.
-- `Cargo.toml`, `src/`, `tests/`: Rust `mde` CLI binary, stdio JSON-RPC MCP server, Tree-sitter CST engine, and automated conformance tests.
+- `schemas/zone-manifest.v0.1.json`: Canonical SHA-256 Vertical Zone Manifest mapping languages and CST nodes to zones, protection flags, and default Layer 2 scale hints.
+- `docs/BENCHMARKS.md`: Reproducible latency measurements and real-corpus conformance pass rates.
+- `Cargo.toml`, `src/`, `tests/`, `examples/`: Rust `mde` CLI binary, stdio JSON-RPC MCP server, Tree-sitter CST engine, native guard, and automated conformance tests.
 
 ## Quickstart
 
 ```sh
 cargo test
 cargo run -- locate src/cst.rs
+cargo run -- guard README.md PROTOCOL.md PLAN.md
+cargo run -- zone-manifest --verify schemas/zone-manifest.v0.1.json
 cargo run -- mcp
 ```
 

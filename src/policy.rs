@@ -30,6 +30,14 @@ pub struct PolicyConfig {
     pub tier0_cmd: Option<Vec<String>>,
     #[serde(default)]
     pub anchors: Vec<AnchorSpec>,
+    #[serde(default = "default_true")]
+    pub enforce_prose_guard: bool,
+    #[serde(default)]
+    pub extra_forbidden_patterns: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for PolicyConfig {
@@ -57,12 +65,15 @@ impl Default for PolicyConfig {
                 "splice_patch".to_string(),
                 "splice_verify".to_string(),
                 "splice_project".to_string(),
+                "mde_guard".to_string(),
             ],
             max_evals: 8,
             max_wall_sec: 30,
             max_trace_bytes: 1_048_576,
             tier0_cmd: None,
             anchors: Vec::new(),
+            enforce_prose_guard: true,
+            extra_forbidden_patterns: Vec::new(),
         }
     }
 }
@@ -73,13 +84,13 @@ impl PolicyConfig {
         if !policy_path.exists() {
             return Ok(Self::default());
         }
-        let raw = fs::read_to_string(&policy_path).map_err(|e| {
+        let raw_text = fs::read_to_string(&policy_path).map_err(|e| {
             MdeError::new(
                 "ERR_POLICY_LOAD",
                 format!("failed to read .mde/policy.json: {e}"),
             )
         })?;
-        serde_json::from_str(&raw).map_err(|e| {
+        serde_json::from_str(&raw_text).map_err(|e| {
             MdeError::new(
                 "ERR_POLICY_LOAD",
                 format!("invalid .mde/policy.json: {e}"),

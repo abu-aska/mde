@@ -1,5 +1,5 @@
 use crate::broker::{
-    Broker, LocateRequest, PatchRequest, ProjectRequest, TraceRequest, VerifyRequest,
+    Broker, GuardRequest, LocateRequest, PatchRequest, ProjectRequest, TraceRequest, VerifyRequest,
 };
 use crate::types::{MdeError, MdeResult, MDE_META_NAMESPACE, MDE_VERSION};
 use serde_json::{json, Value};
@@ -128,6 +128,9 @@ fn handle_tool_call(broker: &mut Broker, req_id: Value, params: &Value) -> Value
             .map_err(|e| MdeError::new("ERR_INVALID_ARGS", format!("{e}")))
             .and_then(|r| broker.splice_project(r))
             .and_then(to_json_value),
+        "mde_guard" => serde_json::from_value::<GuardRequest>(args)
+            .map_err(|e| MdeError::new("ERR_INVALID_ARGS", format!("{e}")))
+            .and_then(|r| broker.mde_guard(r)),
         _ => Err(MdeError::new(
             "ERR_UNKNOWN_TOOL",
             format!("unknown tool: {name}"),
@@ -235,6 +238,20 @@ fn tool_definitions() -> Value {
                     "packet_id": {"type": "string"},
                     "bundle_id": {"type": "string"},
                     "approve_diff_sha256": {"type": "string"}
+                }
+            }
+        },
+        {
+            "name": "mde_guard",
+            "description": "Run deterministic prose, duplicate-reference, forecast, secret/path, or call-policy checks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "paths": {"type": "array", "items": {"type": "string"}},
+                    "text": {"type": "string"},
+                    "check_dupes": {"type": "boolean"},
+                    "check_mentions": {"type": "boolean"},
+                    "call_policy": {"type": "object"}
                 }
             }
         }

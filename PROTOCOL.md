@@ -50,16 +50,21 @@ Before executing any tool call, the broker evaluates a deterministic policy chec
 
 ### 2.4 Syntactic zone classifier (L5 to L4/L2 bridge)
 
-`splice_locate` and `splice_trace` assign a deterministic zone tag to every file and CST byte span:
+`splice_locate` and `splice_trace` assign a deterministic zone tag to every file and CST byte span using the precedence and rules published in `schemas/zone-manifest.v0.1.json` (`formal_proof` > `condensed_json` > `ui_module` > `code` > `prose`):
 
 | Zone | Detection rule | Consumer role in L4 `exo` and L2 `weft` |
 | --- | --- | --- |
-| `prose` | Markdown, plain text, doc comments, and string documentation blocks | Routes plain-language checks and enables `corpus` writing priors |
+| `prose` | Markdown, plain text, doc comments, and string documentation blocks | Runs `mde guard` prose checks and enables `corpus` writing priors |
 | `code` | Standard implementation nodes in Rust, Python, C, and TypeScript | Runs compiler and unit anchors with neutral code priors |
-| `formal_proof` | Lean files (`.lean`), proof blocks, theorem/lemma/tactic spans, or formal spec markers | Disables style rewrites and raises `formal-verification` adapter scale |
-| `ui_module` | CSS, HTML, JSX/TSX, Svelte, SVG, and tagged UI component spans | Routes design checks and enables `weft-eido` design priors |
+| `formal_proof` | Lean files (`.lean`), proof blocks, theorem/lemma/tactic spans, or formal spec markers | Disables style rewrites, protects axioms/SHAs, and raises `formal-verification` adapter scale |
+| `ui_module` | CSS, HTML, JSX/TSX, Svelte, SVG, and tagged UI component spans | Routes design checks, respects `data-eido-skip`, and enables `weft-eido` design priors |
+| `condensed_json` | JSON, JSONL, TOML, and YAML configuration and schema files | Protects exact keys and digests with all style adapters at `0.0` |
 
 Each located node returns `zone` and `span_bytes` inside `_meta["gg.siliconcordat/mde"]`. Higher layers never guess content zones from fragile regexes over raw prompts.
+
+### 2.5 Native prose and safety guard (`mde guard` / `mde_guard`)
+
+`mde` embeds a zero-dependency deterministic guard callable via CLI (`mde guard`), MCP (`mde_guard`), and automatically during `splice_verify` on patched `prose` files. It checks em dashes, clause-stitching semicolons, duplicate GitHub/URL references, paragraphs over 420 characters, banned AI-tell openers, outcome forecasts, secret/local-path leaks, and call-policy rules.
 
 ## 3. Canonical JSON schemas (v0.1)
 

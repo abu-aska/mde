@@ -16,6 +16,7 @@ pub enum Zone {
     Code,
     FormalProof,
     UiModule,
+    CondensedJson,
 }
 
 impl Zone {
@@ -25,6 +26,7 @@ impl Zone {
             Zone::Code => "code",
             Zone::FormalProof => "formal_proof",
             Zone::UiModule => "ui_module",
+            Zone::CondensedJson => "condensed_json",
         }
     }
 }
@@ -40,6 +42,7 @@ pub enum Language {
     Markdown,
     Lean,
     UiText,
+    Json,
     Plain,
 }
 
@@ -365,12 +368,12 @@ pub fn canonicalize_json(val: &Value) -> Value {
 }
 
 pub fn canonical_json_sha256<T: Serialize>(value: &T, omit_field: Option<&str>) -> MdeResult<String> {
-    let mut raw = serde_json::to_value(value)
+    let mut raw_val = serde_json::to_value(value)
         .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("json serialize error: {e}")))?;
-    if let (Some(field), Value::Object(map)) = (omit_field, &mut raw) {
+    if let (Some(field), Value::Object(map)) = (omit_field, &mut raw_val) {
         map.remove(field);
     }
-    let canonical = canonicalize_json(&raw);
+    let canonical = canonicalize_json(&raw_val);
     let encoded = serde_json::to_vec(&canonical)
         .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("canonical encode error: {e}")))?;
     Ok(sha256_prefixed(&encoded))

@@ -2,10 +2,17 @@ use clap::{Parser, Subcommand};
 use mde::broker::{
     Broker, LocateRequest, PatchRequest, ProjectRequest, TraceRequest, VerifyRequest,
 };
+use mde::guard::{
+    check_files, check_sources, evaluate_call_policy, CallPolicyRequest, GuardOptions,
+    DEFAULT_MAX_PARAGRAPH_CHARS,
+};
 use mde::mcp::run_stdio_server;
+use mde::policy::PolicyConfig;
+use mde::types::{MdeError, MdeResult};
+use mde::zone_manifest::{build_zone_manifest, verify_zone_manifest_file};
 use std::fs;
 use std::io::{self, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 #[derive(Parser)]
@@ -40,9 +47,7 @@ enum Commands {
         spec: String,
     },
     /// Verify a Splice Packet in an isolated workspace and emit an Evidence Bundle
-    Verify {
-        packet_id: String,
-    },
+    Verify { packet_id: String },
     /// Project a verified Splice Packet and Evidence Bundle into a minimal Git commit
     Project {
         packet_id: String,
@@ -50,12 +55,79 @@ enum Commands {
         #[arg(long)]
         approve_diff_sha256: Option<String>,
     },
+    /// Run deterministic prose, duplicate-reference, secret/path, and call-policy guard
+    Guard {
+        /// Files to check
+        files: Vec<String>,
+        /// Check inline text instead of files
+        #[arg(long)]
+        text: Option<String>,
+        /// Run duplicate reference check (--dupes parity; enabled by default unless --no-dupes)
+        #[arg(long)]
+        dupes: bool,
+        /// Check only duplicate references
+        #[arg(long)]
+        dupes_only: bool,
+        /// Flag standalone @-mentions
+        #[arg(long)]
+        check_mentions: bool,
+        /// Validate a JSON CallPolicyRequest file (or '-' for stdin) against repo policy
+        #[arg(long)]
+        call_policy: Option<String>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Emit or verify the canonical SHA-256 Vertical Zone Manifest (L5 -> L4/L2/L1)
+    ZoneManifest {
+        /// Write canonical zone manifest JSON to this path
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Verify an existing zone manifest file against compiled rules and digest
+        #[arg(long)]
+        verify: Option<PathBuf>,
+    },
     /// Start JSON-RPC 2.0 stdio MCP server
     Mcp,
 }
 
 fn main() {
     let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Guard {
+            files,
+            text,
+            dupes: _,
+            dupes_only,
+            check_mentions,
+            call_policy,
+            json,
+        } => {
+            let exit_code = run_guard_cli(
+                &cli.root,
+                files,
+                text,
+                dupes_only,
+                check_mentions,
+                call_policy,
+                json,
+            );
+            process::exit(exit_code);
+        }
+        Commands::ZoneManifest { out, verify } => {
+            if let Err(err) = run_zone_manifest_cli(out, verify) {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&err).unwrap_or_else(|_| err.to_string())
+                );
+                process::exit(1);
+            }
+            return;
+        }
+        _ => {}
+    }
+
     let persist_tokens = !matches!(cli.command, Commands::Mcp);
     let mut broker = match Broker::open(&cli.root, persist_tokens) {
         Ok(b) => b,
@@ -79,9 +151,9 @@ fn main() {
             .splice_trace(TraceRequest { path, symbol })
             .and_then(print_json),
         Commands::Patch { spec } => read_json_input(&spec)
-            .and_then(|raw| {
-                serde_json::from_str::<PatchRequest>(&raw)
-                    .map_err(|e| mde::types::MdeError::new("ERR_INVALID_ARGS", format!("{e}")))
+            .and_then(|raw_text| {
+                serde_json::from_str::<PatchRequest>(&raw_text)
+                    .map_err(|e| MdeError::new("ERR_INVALID_ARGS", format!("{e}")))
             })
             .and_then(|req| broker.splice_patch(req))
             .and_then(print_json),
@@ -107,6 +179,7 @@ fn main() {
             let stdout = io::stdout();
             run_stdio_server(&mut broker, BufReader::new(stdin.lock()), stdout.lock())
         }
+        Commands::Guard { .. } | Commands::ZoneManifest { .. } => unreachable!(),
     };
 
     if let Err(err) = result {
@@ -118,21 +191,129 @@ fn main() {
     }
 }
 
-fn read_json_input(spec: &str) -> mde::types::MdeResult<String> {
+fn run_guard_cli(
+    root: &Path,
+    files: Vec<String>,
+    text: Option<String>,
+    dupes_only: bool,
+    check_mentions: bool,
+    call_policy: Option<String>,
+    json_out: bool,
+) -> i32 {
+    let policy = PolicyConfig::load(root).unwrap_or_default();
+
+    if let Some(spec) = call_policy {
+        let raw_text = match read_json_input(&spec) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{e}");
+                return 3;
+            }
+        };
+        let req: CallPolicyRequest = match serde_json::from_str(&raw_text) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("invalid call policy request: {e}");
+                return 3;
+            }
+        };
+        let rep = evaluate_call_policy(root, &req, &policy);
+        if json_out {
+            println!("{}", serde_json::to_string_pretty(&rep).unwrap_or_default());
+        } else if rep.allowed {
+            println!("mde guard call-policy: allowed ({})", rep.verb);
+        } else if let Some(err) = rep.rejection {
+            eprintln!("mde guard call-policy: DENIED ({})", err);
+        }
+        return if rep.allowed { 0 } else { 1 };
+    }
+
+    let opts = GuardOptions {
+        check_prose: !dupes_only,
+        check_dupes: true,
+        check_secrets: !dupes_only,
+        check_mentions,
+        max_paragraph_chars: DEFAULT_MAX_PARAGRAPH_CHARS,
+        max_trace_bytes: policy.max_trace_bytes,
+        extra_forbidden_patterns: policy.extra_forbidden_patterns,
+    };
+
+    let report = if let Some(ref txt) = text {
+        check_sources(&[("<text>", txt.as_str())], &opts)
+    } else if !files.is_empty() {
+        match check_files(&files, &opts) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{e}");
+                return 3;
+            }
+        }
+    } else {
+        eprintln!("usage: mde guard <files...> | --text <str> | --call-policy <spec>");
+        return 3;
+    };
+
+    if json_out {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap_or_default()
+        );
+    } else if report.passed {
+        println!(
+            "mde guard: clean ({} file(s), {} lines)",
+            report.files_checked, report.total_lines
+        );
+    } else {
+        println!(
+            "mde guard: {} finding(s). DO NOT POST:",
+            report.findings.len()
+        );
+        for f in &report.findings {
+            println!("  {}:{}: [{}] {}", f.path, f.line, f.rule, f.message);
+        }
+    }
+
+    if report.passed { 0 } else { 1 }
+}
+
+fn run_zone_manifest_cli(out: Option<PathBuf>, verify: Option<PathBuf>) -> MdeResult<()> {
+    if let Some(path) = verify {
+        let verified = verify_zone_manifest_file(&path)?;
+        return print_json(verified);
+    }
+    let manifest = build_zone_manifest()?;
+    let encoded = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("{e}")))?;
+    if let Some(dest) = out {
+        if let Some(parent) = dest.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| MdeError::new("ERR_IO", format!("mkdir failed: {e}")))?;
+            }
+        }
+        fs::write(&dest, format!("{encoded}\n"))
+            .map_err(|e| MdeError::new("ERR_IO", format!("write manifest failed: {e}")))?;
+    } else {
+        println!("{encoded}");
+    }
+    Ok(())
+}
+
+fn read_json_input(spec: &str) -> MdeResult<String> {
     if spec == "-" {
         let mut buf = String::new();
         io::Read::read_to_string(&mut io::stdin(), &mut buf)
-            .map_err(|e| mde::types::MdeError::new("ERR_IO", format!("stdin read: {e}")))?;
+            .map_err(|e| MdeError::new("ERR_IO", format!("stdin read: {e}")))?;
         Ok(buf)
     } else {
         fs::read_to_string(spec)
-            .map_err(|e| mde::types::MdeError::new("ERR_IO", format!("spec read {spec}: {e}")))
+            .map_err(|e| MdeError::new("ERR_IO", format!("spec read {spec}: {e}")))
     }
 }
 
-fn print_json<T: serde::Serialize>(val: T) -> mde::types::MdeResult<()> {
+fn print_json<T: serde::Serialize>(val: T) -> MdeResult<()> {
     let text = serde_json::to_string_pretty(&val)
-        .map_err(|e| mde::types::MdeError::new("ERR_SERIALIZE", format!("{e}")))?;
+        .map_err(|e| MdeError::new("ERR_SERIALIZE", format!("{e}")))?;
     println!("{text}");
     Ok(())
 }

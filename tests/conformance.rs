@@ -920,7 +920,8 @@ fn live_jsonrpc_stdio_mcp_roundtrip_end_to_end() {
             "splice_trace",
             "splice_patch",
             "splice_verify",
-            "splice_project"
+            "splice_project",
+            "mde_guard"
         ]
     );
 

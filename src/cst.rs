@@ -44,6 +44,7 @@ pub fn detect_language(path: &str) -> Language {
         "md" | "markdown" | "txt" | "rst" => Language::Markdown,
         "lean" => Language::Lean,
         "css" | "scss" | "html" | "htm" | "svg" | "svelte" | "vue" => Language::UiText,
+        "json" | "jsonl" | "toml" | "yaml" | "yml" => Language::Json,
         _ => Language::Plain,
     }
 }
@@ -80,6 +81,7 @@ pub fn analyze_file(path: &str, source: &[u8]) -> MdeResult<ParsedFile> {
     zone_bytes.insert("code".to_string(), 0);
     zone_bytes.insert("formal_proof".to_string(), 0);
     zone_bytes.insert("ui_module".to_string(), 0);
+    zone_bytes.insert("condensed_json".to_string(), 0);
 
     let Some(tree) = parse_tree(language, source)? else {
         let zone = default_zone_for_language(language, source);
@@ -132,6 +134,7 @@ pub fn analyze_file(path: &str, source: &[u8]) -> MdeResult<ParsedFile> {
 fn default_zone_for_language(language: Language, source: &[u8]) -> Zone {
     match language {
         Language::Lean => Zone::FormalProof,
+        Language::Json => Zone::CondensedJson,
         Language::Markdown | Language::Plain => {
             let text = String::from_utf8_lossy(source);
             if text.contains("```lean") || text.contains("@formal-proof") || text.contains("data-eido-skip") {
@@ -159,6 +162,7 @@ fn compute_dominant_zone(
                 "prose" => Zone::Prose,
                 "formal_proof" => Zone::FormalProof,
                 "ui_module" => Zone::UiModule,
+                "condensed_json" => Zone::CondensedJson,
                 _ => Zone::Code,
             };
         }

@@ -1,0 +1,212 @@
+{
+  "schema": "zone-manifest/v0.1",
+  "manifest_id": "sha256:4e00656cb47fce97f687ae638afba22c569b9680b3780eeb2e5ea71a62c55eca",
+  "mde_version": "0.1.0",
+  "precedence_order": [
+    "formal_proof",
+    "condensed_json",
+    "ui_module",
+    "code",
+    "prose"
+  ],
+  "zones": [
+    {
+      "zone": "formal_proof",
+      "l1_bank_tag": 3,
+      "file_extensions": [
+        "lean"
+      ],
+      "tree_sitter_languages": [
+        "rust",
+        "python",
+        "c",
+        "typescript"
+      ],
+      "cst_node_kinds": [
+        "function_item",
+        "function_definition",
+        "line_comment",
+        "block_comment"
+      ],
+      "inline_markers": [
+        "@formal-proof",
+        "data-eido-skip",
+        "theorem ",
+        "lemma ",
+        "```lean"
+      ],
+      "protection_flags": {
+        "protect_axioms": true,
+        "protect_sha_digests": true,
+        "protect_exact_keys": true,
+        "respect_data_eido_skip": true,
+        "preserve_sibling_comments": true,
+        "enforce_prose_guard": false,
+        "prose_rewrite_allowed": false
+      },
+      "default_l2_scales": {
+        "corpus": 0.0,
+        "formal-verification": 1.0,
+        "weft-eido": 0.0
+      }
+    },
+    {
+      "zone": "condensed_json",
+      "l1_bank_tag": 4,
+      "file_extensions": [
+        "json",
+        "jsonl",
+        "toml",
+        "yaml",
+        "yml"
+      ],
+      "tree_sitter_languages": [],
+      "cst_node_kinds": [],
+      "inline_markers": [],
+      "protection_flags": {
+        "protect_axioms": false,
+        "protect_sha_digests": true,
+        "protect_exact_keys": true,
+        "respect_data_eido_skip": true,
+        "preserve_sibling_comments": false,
+        "enforce_prose_guard": false,
+        "prose_rewrite_allowed": false
+      },
+      "default_l2_scales": {
+        "corpus": 0.0,
+        "formal-verification": 0.0,
+        "weft-eido": 0.0
+      }
+    },
+    {
+      "zone": "ui_module",
+      "l1_bank_tag": 2,
+      "file_extensions": [
+        "tsx",
+        "jsx",
+        "css",
+        "scss",
+        "html",
+        "htm",
+        "svg",
+        "svelte",
+        "vue"
+      ],
+      "tree_sitter_languages": [
+        "tsx",
+        "typescript"
+      ],
+      "cst_node_kinds": [
+        "jsx_element",
+        "jsx_self_closing_element",
+        "jsx_fragment"
+      ],
+      "inline_markers": [
+        "@ui-module"
+      ],
+      "protection_flags": {
+        "protect_axioms": false,
+        "protect_sha_digests": true,
+        "protect_exact_keys": false,
+        "respect_data_eido_skip": true,
+        "preserve_sibling_comments": true,
+        "enforce_prose_guard": false,
+        "prose_rewrite_allowed": false
+      },
+      "default_l2_scales": {
+        "corpus": 0.2,
+        "formal-verification": 0.0,
+        "weft-eido": 1.0
+      }
+    },
+    {
+      "zone": "code",
+      "l1_bank_tag": 1,
+      "file_extensions": [
+        "rs",
+        "py",
+        "c",
+        "h",
+        "ts",
+        "mts",
+        "cts"
+      ],
+      "tree_sitter_languages": [
+        "rust",
+        "python",
+        "c",
+        "typescript"
+      ],
+      "cst_node_kinds": [
+        "function_item",
+        "struct_item",
+        "enum_item",
+        "trait_item",
+        "impl_item",
+        "function_definition",
+        "class_definition",
+        "function_declaration",
+        "class_declaration",
+        "method_definition",
+        "interface_declaration",
+        "type_alias_declaration"
+      ],
+      "inline_markers": [],
+      "protection_flags": {
+        "protect_axioms": false,
+        "protect_sha_digests": true,
+        "protect_exact_keys": false,
+        "respect_data_eido_skip": true,
+        "preserve_sibling_comments": true,
+        "enforce_prose_guard": false,
+        "prose_rewrite_allowed": false
+      },
+      "default_l2_scales": {
+        "corpus": 0.4,
+        "formal-verification": 0.5,
+        "weft-eido": 0.0
+      }
+    },
+    {
+      "zone": "prose",
+      "l1_bank_tag": 0,
+      "file_extensions": [
+        "md",
+        "markdown",
+        "txt",
+        "rst"
+      ],
+      "tree_sitter_languages": [
+        "rust",
+        "python",
+        "c",
+        "typescript"
+      ],
+      "cst_node_kinds": [
+        "line_comment",
+        "block_comment",
+        "comment",
+        "string"
+      ],
+      "inline_markers": [
+        "///",
+        "//!",
+        "/**"
+      ],
+      "protection_flags": {
+        "protect_axioms": false,
+        "protect_sha_digests": true,
+        "protect_exact_keys": false,
+        "respect_data_eido_skip": false,
+        "preserve_sibling_comments": true,
+        "enforce_prose_guard": true,
+        "prose_rewrite_allowed": true
+      },
+      "default_l2_scales": {
+        "corpus": 1.0,
+        "formal-verification": 0.0,
+        "weft-eido": 0.0
+      }
+    }
+  ]
+}

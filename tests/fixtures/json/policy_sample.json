@@ -1,0 +1,5 @@
+{
+  "schema": "sample-policy/v0.1",
+  "protected_paths": ["tests/", "anchors/"],
+  "max_evals": 8
+}
