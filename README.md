@@ -39,7 +39,7 @@ Standard MCP servers dump large tool lists and prose rules into prompts on every
 
 ```sh
 cargo test
-cargo run -- locate path/to/file.rs
+cargo run -- locate src/cst.rs
 cargo run -- mcp
 ```
 

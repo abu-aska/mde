@@ -2,5 +2,8 @@
 /Cargo.lock
 .mde/tmp/
 .mde/worktrees/
+.mde/session_tokens.json
+.mde/packets/
+.mde/bundles/
 *.swp
 .DS_Store
