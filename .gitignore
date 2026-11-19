@@ -1,0 +1,6 @@
+/target
+/Cargo.lock
+.mde/tmp/
+.mde/worktrees/
+*.swp
+.DS_Store
